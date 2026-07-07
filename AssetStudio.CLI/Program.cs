@@ -140,7 +140,7 @@ namespace AssetStudio.CLI
                 }
 
                 Logger.Info("Scanning for files...");
-                var files = o.Input.Attributes.HasFlag(FileAttributes.Directory) ? Directory.GetFiles(o.Input.FullName, "*.*", SearchOption.AllDirectories).OrderBy(x => x.Length).ToArray() : new string[] { o.Input.FullName };
+                var files = o.Input.Attributes.HasFlag(FileAttributes.Directory) ? Directory.GetFiles(o.Input.FullName, "*", SearchOption.AllDirectories).OrderBy(x => x.Length).ToArray() : new string[] { o.Input.FullName };
                 Logger.Info($"Found {files.Length} files");
 
                 if (o.MapOp.HasFlag(MapOpType.CABMap))

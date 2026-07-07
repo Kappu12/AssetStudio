@@ -59,7 +59,7 @@ namespace AssetStudio
             }
 
             MergeSplitAssets(path, true);
-            var files = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories).ToList();
+            var files = Directory.GetFiles(path, "*", SearchOption.AllDirectories).ToList();
             var toReadFile = ProcessingSplitFiles(files);
             Load(toReadFile);
 

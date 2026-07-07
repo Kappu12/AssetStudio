@@ -2219,7 +2219,7 @@ namespace AssetStudio.GUI
             if (openFolderDialog.ShowDialog(this) == DialogResult.OK)
             {
                 Logger.Info("Scanning for files...");
-                var files = Directory.GetFiles(openFolderDialog.Folder, "*.*", SearchOption.AllDirectories).ToArray();
+                var files = Directory.GetFiles(openFolderDialog.Folder, "*", SearchOption.AllDirectories).ToArray();
                 Logger.Info($"Found {files.Length} files");
                 AssetsHelper.SetUnityVersion(version);
                 await Task.Run(() => AssetsHelper.BuildCABMap(files, name, openFolderDialog.Folder, Studio.Game));
@@ -2275,7 +2275,7 @@ namespace AssetStudio.GUI
             if (openFolderDialog.ShowDialog(this) == DialogResult.OK)
             {
                 Logger.Info("Scanning for files...");
-                var files = Directory.GetFiles(openFolderDialog.Folder, "*.*", SearchOption.AllDirectories).ToArray();
+                var files = Directory.GetFiles(openFolderDialog.Folder, "*", SearchOption.AllDirectories).ToArray();
                 Logger.Info($"Found {files.Length} files");
 
                 var saveFolderDialog = new OpenFolderDialog();
@@ -2442,7 +2442,7 @@ namespace AssetStudio.GUI
             if (openFolderDialog.ShowDialog(this) == DialogResult.OK)
             {
                 Logger.Info("Scanning for files...");
-                var files = Directory.GetFiles(openFolderDialog.Folder, "*.*", SearchOption.AllDirectories).ToArray();
+                var files = Directory.GetFiles(openFolderDialog.Folder, "*", SearchOption.AllDirectories).ToArray();
                 Logger.Info($"Found {files.Length} files");
 
                 var saveFolderDialog = new OpenFolderDialog();

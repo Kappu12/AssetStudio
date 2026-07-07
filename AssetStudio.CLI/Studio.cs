@@ -33,7 +33,7 @@ namespace AssetStudio.CLI
         public static int ExtractFolder(string path, string savePath)
         {
             int extractedCount = 0;
-            var files = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories);
+            var files = Directory.GetFiles(path, "*", SearchOption.AllDirectories);
             for (int i = 0; i < files.Length; i++)
             {
                 var file = files[i];
