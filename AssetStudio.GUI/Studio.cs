@@ -330,10 +330,7 @@ namespace AssetStudio.GUI
                     {
                         assetItem.Text = assetItem.TypeString + assetItem.UniqueID;
                     }
-                    if (Properties.Settings.Default.displayAll || exportable)
-                    {
-                        exportableAssets.Add(assetItem);
-                    }
+                    exportableAssets.Add(assetItem);
                     Progress.Report(++i, objectCount);
                 }
             }
