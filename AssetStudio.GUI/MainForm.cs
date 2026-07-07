@@ -310,6 +310,8 @@ namespace AssetStudio.GUI
 
             Text = $"Studio v{Application.ProductVersion} - {productName} - {assetsManager.assetsFileList[0].unityVersion} - {assetsManager.assetsFileList[0].m_TargetPlatform}";
 
+            Properties.Settings.Default.modelsOnly = false;
+            listSearch.Text = string.Empty;
             assetListView.VirtualListSize = visibleAssets.Count;
 
             sceneTreeView.BeginUpdate();
@@ -346,7 +348,7 @@ namespace AssetStudio.GUI
                 filterTypeToolStripMenuItem.DropDownItems.Add(typeItem);
             }
             allToolStripMenuItem.Checked = true;
-            var log = $"Finished loading {assetsManager.assetsFileList.Count} files with {assetListView.Items.Count} exportable assets";
+            var log = $"Finished loading {assetsManager.assetsFileList.Count} files with {exportableAssets.Count} listed assets ({visibleAssets.Count} visible)";
             var m_ObjectsCount = assetsManager.assetsFileList.Sum(x => x.m_Objects.Count);
             var objectsCount = assetsManager.assetsFileList.Sum(x => x.Objects.Count);
             if (m_ObjectsCount != objectsCount)
