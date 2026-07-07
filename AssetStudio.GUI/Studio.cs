@@ -384,6 +384,11 @@ namespace AssetStudio.GUI
 
             visibleAssets = exportableAssets;
 
+            if (assetsManager.UsedGenericObjectRead)
+            {
+                return (productName, new List<TreeNode>());
+            }
+
             StatusStripUpdate("Building tree structure...");
 
             var treeNodeCollection = new List<TreeNode>();

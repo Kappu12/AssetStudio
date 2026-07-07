@@ -17,6 +17,8 @@ namespace AssetStudio
         public bool SkipProcess = false;
         public bool ResolveDependencies = false;        
         public string SpecifyUnityVersion;
+        public int LargeUnity6000ObjectCountThreshold = 50000;
+        public bool UsedGenericObjectRead { get; private set; }
         public CancellationTokenSource tokenSource = new CancellationTokenSource();
         public List<SerializedFile> assetsFileList = new List<SerializedFile>();
 
@@ -100,9 +102,29 @@ namespace AssetStudio
 
             if (!SkipProcess)
             {
-                ReadAssets();
-                ProcessAssets();
+                UsedGenericObjectRead = ShouldUseGenericObjectRead();
+                ReadAssets(UsedGenericObjectRead);
+                if (!UsedGenericObjectRead)
+                {
+                    ProcessAssets();
+                }
             }
+        }
+
+        private bool ShouldUseGenericObjectRead()
+        {
+            var objectCount = assetsFileList.Sum(x => x.m_Objects.Count);
+            if (objectCount < LargeUnity6000ObjectCountThreshold)
+            {
+                return false;
+            }
+
+            var hasUnity6000File = assetsFileList.Any(x => x.version.Length > 0 && x.version[0] >= 6000);
+            if (hasUnity6000File)
+            {
+                Logger.Info($"Using fast generic object list for {objectCount} Unity 6000 objects.");
+            }
+            return hasUnity6000File;
         }
 
         private void LoadFile(string fullName)
@@ -589,6 +611,7 @@ namespace AssetStudio
                 assetsFile.reader.Close();
             }
             assetsFileList.Clear();
+            UsedGenericObjectRead = false;
 
             foreach (var resourceFileReader in resourceFileReaders)
             {
@@ -605,7 +628,7 @@ namespace AssetStudio
             GC.Collect();
         }
 
-        private void ReadAssets()
+        private void ReadAssets(bool genericObjectsOnly)
         {
             Logger.Info("Read assets...");
 
@@ -624,7 +647,9 @@ namespace AssetStudio
                     var objectReader = new ObjectReader(assetsFile.reader, assetsFile, objectInfo, Game);
                     try
                     {
-                        Object obj = objectReader.type switch
+                        Object obj = genericObjectsOnly
+                            ? new Object(objectReader) { IsFallbackObject = true }
+                            : objectReader.type switch
                         {
                             ClassIDType.Animation when ClassIDType.Animation.CanParse() => new Animation(objectReader),
                             ClassIDType.AnimationClip when ClassIDType.AnimationClip.CanParse() => new AnimationClip(objectReader),
@@ -687,12 +712,7 @@ namespace AssetStudio
 
         private static bool CanFallbackToGenericObject(ObjectReader objectReader, Exception exception)
         {
-            if (objectReader.version.Length == 0 || objectReader.version[0] < 6000)
-            {
-                return false;
-            }
-
-            return exception is EndOfStreamException || exception.InnerException is EndOfStreamException;
+            return objectReader.version.Length > 0 && objectReader.version[0] >= 6000;
         }
 
         private void ProcessAssets()
