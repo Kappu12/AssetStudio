@@ -17,8 +17,13 @@ namespace AssetStudio
         }
         public static Image<Bgra32> ConvertToImage(this Texture2D m_Texture2D, bool flip)
         {
+            var outputSize = GetOutputBufferSize(m_Texture2D);
+            if (outputSize <= 0)
+            {
+                return null;
+            }
             var converter = new Texture2DConverter(m_Texture2D);
-            var buff = ArrayPool<byte>.Shared.Rent(m_Texture2D.m_Width * m_Texture2D.m_Height * 4);
+            var buff = ArrayPool<byte>.Shared.Rent(outputSize);
             try
             {
                 if (converter.DecodeTexture2D(buff))
@@ -36,6 +41,17 @@ namespace AssetStudio
             {
                 ArrayPool<byte>.Shared.Return(buff, true);
             }
+        }
+
+        private static int GetOutputBufferSize(Texture2D texture)
+        {
+            if (texture.m_Width <= 0 || texture.m_Height <= 0)
+            {
+                return 0;
+            }
+
+            var size = (long)texture.m_Width * texture.m_Height * 4;
+            return size > int.MaxValue ? 0 : (int)size;
         }
 
         public static MemoryStream ConvertToStream(this Texture2D m_Texture2D, ImageFormat imageFormat, bool flip)

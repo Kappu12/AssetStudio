@@ -32,6 +32,10 @@ namespace AssetStudio
             {
                 return false;
             }
+            if (!HasEnoughImageData())
+            {
+                return false;
+            }
             var flag = false;
             var buff = ArrayPool<byte>.Shared.Rent(reader.Size);
             try
@@ -220,6 +224,49 @@ namespace AssetStudio
             }
 
             return flag;
+        }
+
+        private bool HasEnoughImageData()
+        {
+            var expectedSize = GetMinimumImageDataSize();
+            return expectedSize <= 0 || reader.Size >= expectedSize;
+        }
+
+        private long GetMinimumImageDataSize()
+        {
+            long pixels = (long)m_Width * m_Height;
+            return m_TextureFormat switch
+            {
+                TextureFormat.Alpha8 or TextureFormat.R8 => pixels,
+                TextureFormat.ARGB4444 or TextureFormat.RGB565 or TextureFormat.R16 or TextureFormat.R16_Alt
+                    or TextureFormat.RHalf or TextureFormat.RG16 => pixels * 2,
+                TextureFormat.RGB24 => pixels * 3,
+                TextureFormat.RGBA32 or TextureFormat.ARGB32 or TextureFormat.BGRA32 or TextureFormat.RGHalf
+                    or TextureFormat.RFloat or TextureFormat.RGB9e5Float or TextureFormat.RG32 => pixels * 4,
+                TextureFormat.RGBAHalf or TextureFormat.RGFloat or TextureFormat.RGB48 => pixels * 8,
+                TextureFormat.RGBAFloat or TextureFormat.RGBA64 => pixels * 16,
+                TextureFormat.YUY2 => pixels * 2,
+                TextureFormat.DXT1 or TextureFormat.BC4 => GetBlockCompressedSize(4, 4, 8),
+                TextureFormat.DXT5 or TextureFormat.BC5 or TextureFormat.BC6H or TextureFormat.BC7 => GetBlockCompressedSize(4, 4, 16),
+                TextureFormat.ETC_RGB4 or TextureFormat.ETC_RGB4_3DS or TextureFormat.ETC2_RGB
+                    or TextureFormat.ETC2_RGBA1 or TextureFormat.EAC_R or TextureFormat.EAC_R_SIGNED => GetBlockCompressedSize(4, 4, 8),
+                TextureFormat.ETC2_RGBA8 or TextureFormat.ETC_RGBA8_3DS or TextureFormat.EAC_RG
+                    or TextureFormat.EAC_RG_SIGNED => GetBlockCompressedSize(4, 4, 16),
+                TextureFormat.ASTC_RGB_4x4 or TextureFormat.ASTC_RGBA_4x4 or TextureFormat.ASTC_HDR_4x4 => GetBlockCompressedSize(4, 4, 16),
+                TextureFormat.ASTC_RGB_5x5 or TextureFormat.ASTC_RGBA_5x5 or TextureFormat.ASTC_HDR_5x5 => GetBlockCompressedSize(5, 5, 16),
+                TextureFormat.ASTC_RGB_6x6 or TextureFormat.ASTC_RGBA_6x6 or TextureFormat.ASTC_HDR_6x6 => GetBlockCompressedSize(6, 6, 16),
+                TextureFormat.ASTC_RGB_8x8 or TextureFormat.ASTC_RGBA_8x8 or TextureFormat.ASTC_HDR_8x8 => GetBlockCompressedSize(8, 8, 16),
+                TextureFormat.ASTC_RGB_10x10 or TextureFormat.ASTC_RGBA_10x10 or TextureFormat.ASTC_HDR_10x10 => GetBlockCompressedSize(10, 10, 16),
+                TextureFormat.ASTC_RGB_12x12 or TextureFormat.ASTC_RGBA_12x12 or TextureFormat.ASTC_HDR_12x12 => GetBlockCompressedSize(12, 12, 16),
+                _ => 0
+            };
+        }
+
+        private long GetBlockCompressedSize(int blockWidth, int blockHeight, int bytesPerBlock)
+        {
+            var blocksWide = Math.Max(1, (m_Width + blockWidth - 1) / blockWidth);
+            var blocksHigh = Math.Max(1, (m_Height + blockHeight - 1) / blockHeight);
+            return (long)blocksWide * blocksHigh * bytesPerBlock;
         }
 
         private void SwapBytesForXbox(byte[] image_data)

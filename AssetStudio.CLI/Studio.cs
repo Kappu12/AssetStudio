@@ -349,9 +349,6 @@ namespace AssetStudio.CLI
                 case Animator _ when ClassIDType.Animator.CanExport():
                     exportable = true;
                     break;
-                case Object m_Object when m_Object.IsFallbackObject:
-                    exportable = true;
-                    break;
             }
             if (assetItem.Text == "")
             {
