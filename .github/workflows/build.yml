@@ -4,7 +4,12 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -64,9 +69,40 @@ jobs:
           }
           Get-ChildItem -LiteralPath $publishDir -Recurse | Select-Object FullName, Length
 
+      - name: Prepare versioned package
+        id: package
+        shell: pwsh
+        run: |
+          $publishDir = "dist\AssetStudio-win-x64"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME
+          } else {
+            $version = $env:GITHUB_SHA.Substring(0, 7)
+          }
+
+          Move-Item -LiteralPath "$publishDir\AssetStudio.GUI.exe" -Destination "$publishDir\AssetStudio.GUI-$version.exe" -Force
+          Move-Item -LiteralPath "$publishDir\AssetStudio.CLI.exe" -Destination "$publishDir\AssetStudio.CLI-$version.exe" -Force
+
+          $zipPath = "dist\AssetStudio-win-x64-$version.zip"
+          Compress-Archive -Path "$publishDir\*" -DestinationPath $zipPath -Force
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=$zipPath" >> $env:GITHUB_OUTPUT
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AssetStudio-win-x64-${{ github.sha }}
+          name: AssetStudio-win-x64-${{ steps.package.outputs.version }}
           path: dist\AssetStudio-win-x64
           if-no-files-found: error
+
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "${{ steps.package.outputs.zip }}"
+          --title "AssetStudio ${{ github.ref_name }}"
+          --notes "Automated Windows x64 build for ${{ github.ref_name }}."
