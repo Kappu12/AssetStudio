@@ -27,7 +27,6 @@ namespace AssetStudio
         internal HashSet<string> importFilesHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> noexistFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> assetsFileListHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private bool hasLoggedGenericFallbackWarning;
 
         public void LoadFiles(params string[] files)
         {
@@ -667,11 +666,6 @@ namespace AssetStudio
                         {
                             objectReader.Reset();
                             assetsFile.AddObject(new Object(objectReader));
-                            if (!hasLoggedGenericFallbackWarning)
-                            {
-                                Logger.Warning($"Loaded one or more Unity {objectReader.version[0]} objects as generic objects because detailed parsing is not supported yet. Further generic fallback warnings are suppressed.");
-                                hasLoggedGenericFallbackWarning = true;
-                            }
                             Progress.Report(++i, progressCount);
                             continue;
                         }
