@@ -665,7 +665,7 @@ namespace AssetStudio
                         if (CanFallbackToGenericObject(objectReader, e))
                         {
                             objectReader.Reset();
-                            assetsFile.AddObject(new Object(objectReader));
+                            assetsFile.AddObject(new Object(objectReader) { IsFallbackObject = true });
                             Progress.Report(++i, progressCount);
                             continue;
                         }

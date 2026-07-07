@@ -23,6 +23,8 @@ namespace AssetStudio
         public SerializedType serializedType;
         [JsonIgnore]
         public uint byteSize;
+        [JsonIgnore]
+        public bool IsFallbackObject;
 
         public virtual string Name => string.Empty;
 
