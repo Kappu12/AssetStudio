@@ -27,6 +27,7 @@ namespace AssetStudio
         internal HashSet<string> importFilesHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> noexistFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> assetsFileListHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> genericFallbackWarnings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public void LoadFiles(params string[] files)
         {
@@ -662,6 +663,19 @@ namespace AssetStudio
                     }
                     catch (Exception e)
                     {
+                        if (CanFallbackToGenericObject(objectReader, e))
+                        {
+                            objectReader.Reset();
+                            assetsFile.AddObject(new Object(objectReader));
+                            var fallbackKey = $"{assetsFile.fileName}:{objectReader.type}:{objectReader.version[0]}";
+                            if (genericFallbackWarnings.Add(fallbackKey))
+                            {
+                                Logger.Warning($"Loaded one or more {objectReader.type} objects from {assetsFile.fileName} as generic objects because detailed Unity {objectReader.version[0]} parsing is not supported yet.");
+                            }
+                            Progress.Report(++i, progressCount);
+                            continue;
+                        }
+
                         var sb = new StringBuilder();
                         sb.AppendLine("Unable to load object")
                             .AppendLine($"Assets {assetsFile.fileName}")
@@ -675,6 +689,16 @@ namespace AssetStudio
                     Progress.Report(++i, progressCount);
                 }
             }
+        }
+
+        private static bool CanFallbackToGenericObject(ObjectReader objectReader, Exception exception)
+        {
+            if (objectReader.version.Length == 0 || objectReader.version[0] < 6000)
+            {
+                return false;
+            }
+
+            return exception is EndOfStreamException || exception.InnerException is EndOfStreamException;
         }
 
         private void ProcessAssets()
