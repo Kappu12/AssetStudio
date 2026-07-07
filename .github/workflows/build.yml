@@ -3,57 +3,70 @@ name: Build
 on:
   push:
     branches:
-      - 'main'
-    paths-ignore:
-      - '**/LICENSE'
-      - '**/README.md'
-      - '**/build.yml'
-      - '**/.gitignore'
-      - '**/.gitattributes'
+      - main
   workflow_dispatch:
+
 jobs:
-  build:
+  build-windows:
+    name: Build Windows x64
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: microsoft/setup-msbuild@v1.1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Nuget Restore
-        run: nuget restore
-
-      - name: Build .Net7
-        run: msbuild /t:AssetStudio_GUI:publish /p:Configuration=Release /p:TargetFramework=net7.0-windows /p:SelfContained=false /verbosity:minimal
-
-      - name: Build .Net8
-        run: msbuild /t:AssetStudio_GUI:publish /p:Configuration=Release /p:TargetFramework=net8.0-windows /p:SelfContained=false /verbosity:minimal
-
-      - name: Build .Net7 CLI
-        run: msbuild /t:AssetStudio_CLI:publish /p:Configuration=Release /p:TargetFramework=net7.0-windows /p:SelfContained=false /verbosity:minimal
-
-      - name: Build .Net8 CLI
-        run: msbuild /t:AssetStudio_CLI:publish /p:Configuration=Release /p:TargetFramework=net8.0-windows /p:SelfContained=false /verbosity:minimal
-
-      - name: Upload .Net7 Artifact
-        uses: actions/upload-artifact@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-          name: net7.0-${{ github.sha }}
-          path: AssetStudio.GUI/bin/Release/net7.0-windows/publish
+          dotnet-version: 8.0.x
 
-      - name: Upload .Net8 Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: net8.0-${{ github.sha }}
-          path: AssetStudio.GUI/bin/Release/net8.0-windows/publish
+      - name: Restore
+        run: dotnet restore AssetStudio.sln
 
-      - name: Upload .Net7 CLI Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: net7.0-${{ github.sha }}
-          path: AssetStudio.GUI/bin/Release/net7.0-windows/publish
+      - name: Publish GUI
+        run: >
+          dotnet publish AssetStudio.GUI\AssetStudio.GUI.csproj
+          -c Release
+          -f net8.0-windows
+          -r win-x64
+          --self-contained true
+          -o dist\AssetStudio-win-x64
+          /p:PublishSingleFile=true
+          /p:IncludeNativeLibrariesForSelfExtract=true
+          /p:EnableCompressionInSingleFile=true
 
-      - name: Upload .Net8 CLI Artifact
-        uses: actions/upload-artifact@v3
+      - name: Publish CLI
+        run: >
+          dotnet publish AssetStudio.CLI\AssetStudio.CLI.csproj
+          -c Release
+          -f net8.0-windows
+          -r win-x64
+          --self-contained true
+          -o dist\AssetStudio-win-x64
+          /p:PublishSingleFile=true
+          /p:IncludeNativeLibrariesForSelfExtract=true
+          /p:EnableCompressionInSingleFile=true
+
+      - name: Verify artifact contents
+        shell: pwsh
+        run: |
+          $publishDir = "dist\AssetStudio-win-x64"
+          $required = @(
+            "$publishDir\AssetStudio.GUI.exe",
+            "$publishDir\AssetStudio.CLI.exe",
+            "$publishDir\x64\AssetStudio.FBXNative.dll",
+            "$publishDir\x86\AssetStudio.FBXNative.dll"
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path -LiteralPath $path)) {
+              throw "Missing expected artifact file: $path"
+            }
+          }
+          Get-ChildItem -LiteralPath $publishDir -Recurse | Select-Object FullName, Length
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: net8.0-${{ github.sha }}
-          path: AssetStudio.GUI/bin/Release/net8.0-windows/publish
+          name: AssetStudio-win-x64-${{ github.sha }}
+          path: dist\AssetStudio-win-x64
+          if-no-files-found: error
