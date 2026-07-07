@@ -116,6 +116,16 @@ namespace AssetStudio
                     {
                         var m_RayTraceProcedural = reader.ReadByte();
                     }
+                    if (version[0] >= 6000)
+                    {
+                        var m_RayTracingAccelStructBuildFlagsOverride = reader.ReadByte();
+                        var m_RayTracingAccelStructBuildFlags = reader.ReadByte();
+                        var m_SmallMeshCulling = reader.ReadByte();
+                        reader.AlignStream();
+                        var m_ForceMeshLod = reader.ReadInt16();
+                        reader.AlignStream();
+                        var m_MeshLodSelectionBias = reader.ReadSingle();
+                    }
                     if (reader.Game.Type.IsGI() || reader.Game.Type.IsGICB3() || reader.Game.Type.IsGICB3Pre())
                     {
                         var m_MeshShowQuality = reader.ReadByte();
@@ -226,9 +236,17 @@ namespace AssetStudio
                     var m_SortingLayerID = reader.ReadUInt32();
                 }
 
-                //SInt16 m_SortingLayer 5.6 and up
+                if (version[0] >= 6000)
+                {
+                    var m_SortingLayer = reader.ReadInt16();
+                }
+
                 var m_SortingOrder = reader.ReadInt16();
                 reader.AlignStream();
+                if (version[0] >= 6000)
+                {
+                    var m_MaskInteraction = reader.ReadInt32();
+                }
                 if (reader.Game.Type.IsGIGroup() || reader.Game.Type.IsBH3())
                 {
                     var m_UseHighestMip = reader.ReadBoolean();
