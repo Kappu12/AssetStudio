@@ -27,6 +27,7 @@ namespace AssetStudio
         internal HashSet<string> importFilesHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> noexistFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         internal HashSet<string> assetsFileListHash = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> extractedFileAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public void LoadFiles(params string[] files)
         {
@@ -154,6 +155,17 @@ namespace AssetStudio
                 try
                 {
                     var assetsFile = new SerializedFile(reader, this);
+                    var logicalFileName = GetLogicalFileName(reader);
+                    if (!string.IsNullOrEmpty(logicalFileName))
+                    {
+                        if (assetsFileListHash.Contains(logicalFileName))
+                        {
+                            reader.Dispose();
+                            return;
+                        }
+
+                        assetsFile.fileName = logicalFileName;
+                    }
                     CheckStrippedVersion(assetsFile);
                     assetsFileList.Add(assetsFile);
                     assetsFileListHash.Add(assetsFile.fileName);
@@ -165,20 +177,12 @@ namespace AssetStudio
 
                         if (!importFilesHash.Contains(sharedFileName))
                         {
-                            var sharedFilePath = Path.Combine(Path.GetDirectoryName(reader.FullPath), sharedFileName);
+                            var sharedFilePath = FindExternalFile(reader.FullPath, sharedFileName);
                             if (!noexistFiles.Contains(sharedFilePath))
                             {
-                                if (!File.Exists(sharedFilePath))
-                                {
-                                    var findFiles = Directory.GetFiles(Path.GetDirectoryName(reader.FullPath), sharedFileName, SearchOption.AllDirectories);
-                                    if (findFiles.Length > 0)
-                                    {
-                                        Logger.Verbose($"Found {findFiles.Length} matching files, picking first file {findFiles[0]} !!");
-                                        sharedFilePath = findFiles[0];
-                                    }
-                                }
                                 if (File.Exists(sharedFilePath))
                                 {
+                                    extractedFileAliases[Path.GetFullPath(sharedFilePath)] = sharedFileName;
                                     importFiles.Add(sharedFilePath);
                                     importFilesHash.Add(sharedFileName);
                                 }
@@ -202,6 +206,57 @@ namespace AssetStudio
                 Logger.Info($"Skipping {reader.FullPath}");
                 reader.Dispose();
             }
+        }
+
+        private string GetLogicalFileName(FileReader reader)
+        {
+            if (extractedFileAliases.TryGetValue(reader.FullPath, out var alias))
+            {
+                return alias;
+            }
+
+            return null;
+        }
+
+        private static string FindExternalFile(string sourcePath, string sharedFileName)
+        {
+            var sourceDirectory = Path.GetDirectoryName(sourcePath);
+            var sharedFilePath = Path.Combine(sourceDirectory, sharedFileName);
+            if (File.Exists(sharedFilePath))
+            {
+                return sharedFilePath;
+            }
+
+            var unpackedDirectoryName = $"{sharedFileName}_unpacked";
+            var searchDirectories = new[]
+            {
+                sourceDirectory,
+                Directory.GetParent(sourceDirectory)?.FullName
+            }.Where(x => !string.IsNullOrEmpty(x)).Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var searchDirectory in searchDirectories)
+            {
+                var unpackedDirectory = Path.Combine(searchDirectory, unpackedDirectoryName);
+                if (Directory.Exists(unpackedDirectory))
+                {
+                    var assetFile = Directory.GetFiles(unpackedDirectory, "*", SearchOption.TopDirectoryOnly)
+                        .FirstOrDefault(x => !x.EndsWith(".resS", StringComparison.OrdinalIgnoreCase)
+                            && !x.EndsWith(".resource", StringComparison.OrdinalIgnoreCase));
+                    if (assetFile != null)
+                    {
+                        Logger.Verbose($"Found extracted dependency {assetFile} for {sharedFileName} !!");
+                        return assetFile;
+                    }
+                }
+
+                var matchingFiles = Directory.GetFiles(searchDirectory, sharedFileName, SearchOption.AllDirectories);
+                if (matchingFiles.Length > 0)
+                {
+                    Logger.Verbose($"Found {matchingFiles.Length} matching files, picking first file {matchingFiles[0]} !!");
+                    return matchingFiles[0];
+                }
+            }
+
+            return sharedFilePath;
         }
 
         private void LoadAssetsFromMemory(FileReader reader, string originalPath, string unityVersion = null, long originalOffset = 0)
@@ -597,6 +652,7 @@ namespace AssetStudio
             resourceFileReaders.Clear();
 
             assetsFileIndexCache.Clear();
+            extractedFileAliases.Clear();
 
             tokenSource.Dispose();
             tokenSource = new CancellationTokenSource();
