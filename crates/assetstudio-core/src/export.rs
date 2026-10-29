@@ -95,6 +95,16 @@ impl Session {
         output: &Path,
         options: &ExportOptions,
     ) -> Result<OperationReport> {
+        self.export_with_model_options(keys, output, options, &crate::ModelExportOptions::default())
+    }
+
+    pub fn export_with_model_options(
+        &self,
+        keys: &[AssetKey],
+        output: &Path,
+        options: &ExportOptions,
+        model_options: &crate::ModelExportOptions,
+    ) -> Result<OperationReport> {
         let records = self.selected(keys)?;
         let destination = SafeOutput::new(output)?;
         let mut report = OperationReport::default();
@@ -102,11 +112,12 @@ impl Session {
         for record in records {
             if options.mode == ExportMode::Convert && matches!(record.class_id, 1 | 95) {
                 let folder = destination.directory(&group_directory(record, options.group))?;
-                match self.export_scene_with_limit(
+                match self.export_scene_with_limit_and_options(
                     &folder,
                     ModelFormat::FbxBinary,
                     &[record.key],
                     MAX_EXPORT_TOTAL_BYTES.saturating_sub(total),
+                    model_options,
                 ) {
                     Ok(scene) => {
                         for path in &scene.written {
@@ -153,7 +164,7 @@ impl Session {
             ExportMode::Raw => ("dat".to_owned(), Payload::Raw),
             ExportMode::Dump => (
                 "txt".to_owned(),
-                Payload::Bytes(object.read_type_tree_dump(MAX_EXPORT_FILE_BYTES)?),
+                Payload::Bytes(self.object_dump(record.key, MAX_EXPORT_FILE_BYTES)?),
             ),
             ExportMode::Json => (
                 "json".to_owned(),
@@ -175,6 +186,7 @@ impl Session {
             component(&extension)
         );
         let path = folder.join(filename);
+        self.check_output_target(&path)?;
         let mut written = 0u64;
         let limit = remaining.min(MAX_EXPORT_FILE_BYTES);
         let published = atomic_write(&path, options.overwrite, |file| {
@@ -291,8 +303,9 @@ impl Session {
                 )
             }
             21 | 114 => ("json".into(), Payload::Bytes(self.object_json(record.key)?)),
-            74 => bail!(
-                "standalone AnimationClip .anim conversion is not implemented; use JSON/dump with an embedded type tree or export an animated FBX scene"
+            74 => (
+                "anim".into(),
+                Payload::Bytes(crate::animation::read_animation_yaml(self, record.key)?),
             ),
             1208 => {
                 let bytes = read_bin_data(self, record.key, MAX_EXPORT_FILE_BYTES)?;
@@ -308,6 +321,50 @@ impl Session {
             // The original ExportConvertFile intentionally exported every other class raw.
             _ => ("dat".into(), Payload::Raw),
         })
+    }
+
+    fn object_dump(&self, key: AssetKey, maximum: u64) -> Result<Vec<u8>> {
+        use unity_rs_core::mono_schema::{
+            MonoBehaviourSchemaIdentity, MonoBehaviourSchemaProvider, MonoBehaviourSchemaSource,
+            read_mono_behaviour_value_with_provider,
+        };
+        let object = self.object(key)?;
+        if object.class_id() != 114 {
+            return Ok(object.read_type_tree_dump(maximum)?);
+        }
+        let file = &self.studio.collection().serialized_files()[key.file_index].file;
+        let resolved = read_mono_behaviour_value_with_provider(
+            self.studio.collection(),
+            key.file_index,
+            object.object_index(),
+            &self.mono_schemas,
+            unity_rs_core::monobehaviour::MonoBehaviourReadLimits::default(),
+        )?;
+        let tree = match resolved.source {
+            MonoBehaviourSchemaSource::Embedded => file.object_type_tree(object.object_index())?,
+            MonoBehaviourSchemaSource::External => {
+                let script = resolved
+                    .script
+                    .as_ref()
+                    .context("external MonoBehaviour schema has no resolved script identity")?;
+                self.mono_schemas
+                    .schema(MonoBehaviourSchemaIdentity {
+                        unity_version: &file.unity_version_string,
+                        assembly_name: &script.assembly_name,
+                        namespace: &script.namespace,
+                        class_name: &script.class_name,
+                    })?
+                    .context("MonoBehaviour dump schema is no longer available")?
+            }
+        };
+        let mut output = LimitedBytes::new(maximum);
+        unity_rs_core::type_tree_dump::write_type_tree_dump(
+            tree,
+            &resolved.value,
+            &mut output,
+            maximum,
+        )?;
+        Ok(output.into_inner())
     }
 
     fn object_json(&self, key: AssetKey) -> Result<Vec<u8>> {
@@ -343,7 +400,7 @@ impl Session {
                 if bytes.len()>maximum_bytes {bail!("material JSON exceeds output limit");}
                 Ok(bytes)
             },
-            Err(error)=>Err(error).context("structured JSON requires an embedded type tree or a trusted MonoBehaviour JSON schema; automatic dummy-DLL schema generation is not implemented"),
+            Err(error)=>Err(error).context("structured JSON for this class requires an embedded Unity type tree; MonoBehaviour scripts can also use trusted JSON schemas or native DLL metadata"),
         }
     }
 
@@ -362,6 +419,7 @@ impl Session {
         let destination = SafeOutput::new(parent)?;
         let filename = output.file_name().context("map filename is missing")?;
         let path = destination.root().join(filename);
+        self.check_output_target(&path)?;
         let published = atomic_write(&path, false, |file| {
             let mut writer = LimitedWriter {
                 inner: file,
@@ -529,6 +587,36 @@ pub(crate) fn read_index_data(
 }
 
 fn material_json(material: unity_rs_core::material::Material) -> Result<Vec<u8>> {
+    for property in &material.saved_properties.texture_environments {
+        if property
+            .value
+            .scale
+            .iter()
+            .chain(&property.value.offset)
+            .any(|value| !value.is_finite())
+        {
+            bail!(
+                "material texture property {:?} has a non-finite transform that JSON cannot preserve",
+                property.name
+            );
+        }
+    }
+    for property in &material.saved_properties.floats {
+        if !property.value.is_finite() {
+            bail!(
+                "material float property {:?} has a non-finite value that JSON cannot preserve",
+                property.name
+            );
+        }
+    }
+    for property in &material.saved_properties.colors {
+        if property.value.iter().any(|value| !value.is_finite()) {
+            bail!(
+                "material color property {:?} has a non-finite value that JSON cannot preserve",
+                property.name
+            );
+        }
+    }
     let textures:Vec<_>=material.saved_properties.texture_environments.into_iter().map(|property|{let value=property.value;serde_json::json!({"name":property.name,"texture":{"file_id":value.texture.file_id,"path_id":value.texture.path_id},"scale":value.scale,"offset":value.offset})}).collect();
     let integers: Vec<_> = material
         .saved_properties
@@ -597,5 +685,69 @@ mod tests {
         assert_eq!(container_extension("a/b.json"), Some("json".into()));
         assert_eq!(container_extension("a\\b.unity3d"), Some("unity3d".into()));
         assert!(container_extension("a.x:y").is_none());
+    }
+    #[test]
+    fn material_json_never_replaces_nonfinite_numbers_with_null() {
+        use unity_rs_core::material::{
+            Material, MaterialPropertySheet, MaterialTextureEnvironment, NamedMaterialProperty,
+        };
+        use unity_rs_core::serialized::ObjectReference;
+        let reference = ObjectReference {
+            file_id: 0,
+            path_id: 0,
+        };
+        let material = Material {
+            path_id: 1,
+            name: "material".into(),
+            shader: reference,
+            legacy_shader_keywords: Vec::new(),
+            valid_keywords: Vec::new(),
+            invalid_keywords: Vec::new(),
+            lightmap_flags: None,
+            enable_instancing_variants: None,
+            custom_render_queue: None,
+            string_tags: Vec::new(),
+            disabled_shader_passes: Vec::new(),
+            saved_properties: MaterialPropertySheet {
+                texture_environments: vec![NamedMaterialProperty {
+                    name: "_MainTex".into(),
+                    value: MaterialTextureEnvironment {
+                        texture: reference,
+                        scale: [1.0, 1.0],
+                        offset: [0.0, 0.0],
+                    },
+                }],
+                integers: Vec::new(),
+                floats: vec![NamedMaterialProperty {
+                    name: "_Glossiness".into(),
+                    value: 0.5,
+                }],
+                colors: vec![NamedMaterialProperty {
+                    name: "_Color".into(),
+                    value: [1.0; 4],
+                }],
+            },
+            trailing_bytes: 0,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&material_json(material.clone()).unwrap()).unwrap();
+        assert_eq!(json["saved_properties"]["floats"][0]["value"], 0.5);
+        for property in 0..4 {
+            let mut invalid = material.clone();
+            match property {
+                0 => {
+                    invalid.saved_properties.texture_environments[0].value.scale[0] = f32::INFINITY
+                }
+                1 => {
+                    invalid.saved_properties.texture_environments[0]
+                        .value
+                        .offset[1] = f32::NEG_INFINITY
+                }
+                2 => invalid.saved_properties.floats[0].value = f32::NAN,
+                _ => invalid.saved_properties.colors[0].value[3] = f32::NAN,
+            }
+            let error = material_json(invalid).unwrap_err().to_string();
+            assert!(error.contains("non-finite"), "{error}");
+        }
     }
 }

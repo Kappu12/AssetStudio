@@ -1,0 +1,22 @@
+{
+  "source_repository": "https://github.com/Kappu12/AssetStudio",
+  "source_commit": "94318fa4eecb79190330da933bbc3d7de49055ed",
+  "source_file": "AssetStudio/Crypto/NetEaseUtils.cs",
+  "source_sha256": "ad0f8164a54d5a7dbfee029ded536b52a76672d002a4d77155ad3552a64a4eb6",
+  "oracle_runtime": ".NET 8.0.33",
+  "oracle_compiler": "Roslyn 4.11.0-3.25569.22 (SDK 8.0.427)",
+  "input_formula": "byte[i] = (i * 19 + 71) & 255",
+  "header_800_overrides": {
+    "0..4": "ee dd 17 20",
+    "4": "2e",
+    "6": "2e",
+    "8": "66",
+    "9": "66",
+    "10": "31"
+  },
+  "expected_sha256": {
+    "header-800-expected.bin": "48dffc73f5e3770fbf89d64b44481beaaffce18b8547f66cf1171ba0ce9634c3",
+    "raw-4100-expected.bin": "c98a4168df92f0487d49de44a345ace412c39fb83d4e4913eb2a82774f87ff8c",
+    "raw-80-expected.bin": "f573bbe159f592ff52148a12e461233e9b6dced926c4d8aa896991bf155d493a"
+  }
+}

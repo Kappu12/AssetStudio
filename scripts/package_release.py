@@ -338,12 +338,17 @@ def make_package(
         licenses.mkdir(parents=True)
         for name in BACKEND_DOCUMENTS:
             shutil.copy2(backend / name, licenses / name)
-        for name in ("rust-rewrite.md", "compatibility.md", "game-compatibility.md", "releasing.md"):
-            document = root / "docs" / name
+        for name in (
+            "docs/rust-rewrite.md", "docs/feature-parity.md",
+            "docs/game-compatibility.md", "docs/review-sweeps.md", "docs/releasing.md",
+            "crates/assetstudio-cli/README.md",
+        ):
+            document = root / name
             if document.is_file():
                 require_file(document)
-                (stage / "docs").mkdir(exist_ok=True)
-                shutil.copy2(document, stage / "docs" / name)
+                destination = stage / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(document, destination)
         dependencies = copy_dependency_licenses(metadata, stage)
         (stage / "dependency-inventory.json").write_text(
             json.dumps(dependencies, indent=2) + "\n", encoding="utf-8", newline="\n",

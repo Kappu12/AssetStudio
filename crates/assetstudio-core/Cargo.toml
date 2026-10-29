@@ -6,16 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+quick-xml = "=0.41.0"
 unity_rs_core.workspace = true
 anyhow.workspace = true
+ab_glyph = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 tempfile.workspace = true
 aes = "0.8"
 md-5 = "0.10"
-lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "std"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "safe-encode", "std"] }
 lzma-rust2 = { version = "0.21", default-features = false, features = ["std"] }
+
+same-file = "1.0"
 
 [lints]
 workspace = true

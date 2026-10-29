@@ -1,16 +1,17 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use assetstudio_core::{
     AssetKey, AssetRecord, ExportMode, ExportOptions, GroupMode, ImageFormat, LoadOptions,
-    MapFormat, ModelFormat, OperationReport, Preview, SceneNode, Session,
+    MapFormat, ModelExportOptions, ModelFormat, OperationReport, Preview, SceneNode, Session,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, TextEdit, Vec2};
 
 use crate::audio::AudioPlayer;
-use crate::view::{self, Filters, MeshPreview, SortColumn};
+use crate::preview_image::{self, Channels};
+use crate::view::{self, Catalog, Filters, MeshMode, MeshPreview, SortColumn};
 
 const ACCENT: Color32 = Color32::from_rgb(111, 224, 191);
 const MUTED: Color32 = Color32::from_rgb(144, 159, 180);
@@ -32,25 +33,48 @@ enum TaskKind {
     Scene,
     Export,
     Audio,
+    Filter,
+    KeyList,
+    ImageChannels,
 }
 
 enum TaskPayload {
     Loaded {
         paths: Vec<PathBuf>,
+        resolved_paths: Vec<PathBuf>,
+        auxiliary_inputs: Vec<PathBuf>,
         session: Arc<Session>,
         options: LoadOptions,
+        catalog: Catalog,
+    },
+    KeyNames {
+        source: String,
+        result: Result<Vec<String>, String>,
+    },
+    Filtered {
+        generation: u64,
+        revision: u64,
+        result: Result<Vec<usize>, String>,
     },
     Preview {
         generation: u64,
         key: AssetKey,
         preview: Preview,
     },
+    ImageChannels {
+        generation: u64,
+        key: AssetKey,
+        revision: u64,
+        result: Result<egui::ColorImage, String>,
+    },
     Scene {
         generation: u64,
         nodes: Vec<SceneNode>,
+        rows: Vec<(usize, usize)>,
     },
     Audio {
         generation: u64,
+        revision: u64,
         key: AssetKey,
         bytes: Vec<u8>,
     },
@@ -64,13 +88,24 @@ struct Task {
     receiver: mpsc::Receiver<Result<TaskPayload, String>>,
     kind: TaskKind,
     label: &'static str,
+    generation: u64,
+    revision: u64,
 }
 
 enum DisplayPreview {
     Text(String),
-    Image(egui::TextureHandle),
+    Image(ImagePreview),
     Mesh(MeshPreview),
     Error(String),
+}
+
+struct ImagePreview {
+    texture: egui::TextureHandle,
+    original: Arc<Vec<u8>>,
+    width: u32,
+    height: u32,
+    channels: Channels,
+    revision: u64,
 }
 
 struct LogEntry {
@@ -83,9 +118,14 @@ struct LoadSettings {
     game: String,
     unity_version: String,
     unity_cn_key: String,
+    unity_cn_keys_file: String,
+    unity_cn_key_index: usize,
     xor_key: String,
     asset_index: String,
     schemas: String,
+    dummy_dlls: String,
+    cab_map: String,
+    cab_base: String,
     continue_on_error: bool,
 }
 
@@ -118,7 +158,15 @@ impl LoadSettings {
             xor_key,
             continue_on_error: self.continue_on_error,
         };
-        options.validate().map_err(|error| error.to_string())?;
+        if options.game.eq_ignore_ascii_case("UnityCN") && options.unity_cn_key.is_none() {
+            // Resource lookup belongs to the load worker; validate all other
+            // fields now without opening a key file on the UI thread.
+            let mut validation = options.clone();
+            validation.game = "Normal".to_owned();
+            validation.validate().map_err(|error| error.to_string())?;
+        } else {
+            options.validate().map_err(|error| error.to_string())?;
+        }
         Ok(options)
     }
 }
@@ -131,9 +179,12 @@ pub struct StudioApp {
     session: Option<Arc<Session>>,
     source: Option<PathBuf>,
     sources: Vec<PathBuf>,
+    resolved_sources: Vec<PathBuf>,
+    source_auxiliary: Vec<PathBuf>,
     source_options: LoadOptions,
     generation: u64,
-    assets: Vec<AssetRecord>,
+    assets: Arc<Vec<AssetRecord>>,
+    by_key: HashMap<AssetKey, usize>,
     classes: BTreeMap<String, usize>,
     visible: Vec<usize>,
     filters: Filters,
@@ -141,13 +192,17 @@ pub struct StudioApp {
     sort: SortColumn,
     descending: bool,
     filter_dirty: bool,
+    filter_revision: u64,
+    pending_filter: bool,
     selected: HashSet<AssetKey>,
     primary: Option<AssetKey>,
     anchor: Option<AssetKey>,
     preview: Option<DisplayPreview>,
     pending_preview: Option<AssetKey>,
+    pending_channels: Option<(AssetKey, u64)>,
     image_zoom: f32,
     image_fit: bool,
+    mesh_mode: MeshMode,
     scene: Vec<SceneNode>,
     scene_loaded: bool,
     scene_error: Option<String>,
@@ -155,7 +210,10 @@ pub struct StudioApp {
     pending_scene: bool,
     task: Option<Task>,
     export_options: ExportOptions,
+    model_options: ModelExportOptions,
     load_settings: LoadSettings,
+    unity_cn_names: Vec<String>,
+    pending_key_names: Option<String>,
     settings_open: bool,
     input_path: String,
     tab: Tab,
@@ -163,6 +221,7 @@ pub struct StudioApp {
     last_error: Option<String>,
     status: String,
     audio: AudioPlayer,
+    audio_revision: u64,
 }
 
 impl StudioApp {
@@ -172,9 +231,12 @@ impl StudioApp {
             session: None,
             source: None,
             sources: Vec::new(),
+            resolved_sources: Vec::new(),
+            source_auxiliary: Vec::new(),
             source_options: LoadOptions::default(),
             generation: 0,
-            assets: Vec::new(),
+            assets: Arc::new(Vec::new()),
+            by_key: HashMap::new(),
             classes: BTreeMap::new(),
             visible: Vec::new(),
             filters: Filters::default(),
@@ -182,13 +244,17 @@ impl StudioApp {
             sort: SortColumn::Name,
             descending: false,
             filter_dirty: false,
+            filter_revision: 0,
+            pending_filter: false,
             selected: HashSet::new(),
             primary: None,
             anchor: None,
             preview: None,
             pending_preview: None,
+            pending_channels: None,
             image_zoom: 1.0,
             image_fit: true,
+            mesh_mode: MeshMode::Shaded,
             scene: Vec::new(),
             scene_loaded: false,
             scene_error: None,
@@ -196,10 +262,13 @@ impl StudioApp {
             pending_scene: false,
             task: None,
             export_options: ExportOptions::default(),
+            model_options: ModelExportOptions::default(),
             load_settings: LoadSettings {
                 game: "Normal".to_owned(),
                 ..Default::default()
             },
+            unity_cn_names: Vec::new(),
+            pending_key_names: None,
             settings_open: false,
             input_path: String::new(),
             tab: Tab::Assets,
@@ -207,11 +276,144 @@ impl StudioApp {
             last_error: None,
             status: "Open a Unity file, bundle, or game data folder to begin.".to_owned(),
             audio: AudioPlayer::default(),
+            audio_revision: 0,
         };
+        match crate::preferences::load()
+            .and_then(|value| value.map(|value| app.apply_preferences(&value)).transpose())
+        {
+            Ok(_) => {}
+            Err(error) => {
+                app.status = format!("Saved settings could not be restored: {error}");
+                app.log(false, app.status.clone());
+            }
+        }
         if let Some(path) = initial_path {
             app.open_path(path, context);
         }
         app
+    }
+
+    fn preferences_value(&self) -> serde_json::Value {
+        let load = &self.load_settings;
+        serde_json::json!({
+            "load": {
+                "game":load.game,"unity_version":load.unity_version,
+                "unity_cn_keys_file":load.unity_cn_keys_file,"unity_cn_key_index":load.unity_cn_key_index,
+                "xor_key":load.xor_key,"asset_index":load.asset_index,"schemas":load.schemas,
+                "dummy_dlls":load.dummy_dlls,"cab_map":load.cab_map,"cab_base":load.cab_base,
+                "continue_on_error":load.continue_on_error,
+            },
+            "export": {
+                "mode":match self.export_options.mode {ExportMode::Convert=>"Convert",ExportMode::Raw=>"Raw",ExportMode::Dump=>"Dump",ExportMode::Json=>"Json"},
+                "group":match self.export_options.group {GroupMode::ByType=>"ByType",GroupMode::ByContainer=>"ByContainer",GroupMode::BySource=>"BySource",GroupMode::None=>"None"},
+                "image_format":match self.export_options.image_format {ImageFormat::Png=>"Png",ImageFormat::Jpeg=>"Jpeg",ImageFormat::Bmp=>"Bmp",ImageFormat::Tga=>"Tga"},
+                "overwrite":self.export_options.overwrite,
+                "include_animations":self.model_options.include_animations,
+                "include_textures":self.model_options.include_textures,
+            },
+            "preview": {
+                "image_zoom":self.image_zoom,"image_fit":self.image_fit,
+                "mesh_mode":match self.mesh_mode {MeshMode::Shaded=>"Shaded",MeshMode::Wireframe=>"Wireframe",MeshMode::Combined=>"Combined"},
+                "audio_volume":self.audio.volume(),"audio_loop":self.audio.is_looping(),
+            },
+        })
+    }
+
+    fn apply_preferences(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        if !value.is_object() {
+            return Err("Settings must contain an object.".to_owned());
+        }
+        let load = &value["load"];
+        let export = &value["export"];
+        let preview = &value["preview"];
+        for section in [load, export, preview] {
+            if !section.is_null() && !section.is_object() {
+                return Err("A saved settings section is invalid.".to_owned());
+            }
+        }
+        let mut settings = LoadSettings::default();
+        for (name, target) in [
+            ("game", &mut settings.game),
+            ("unity_version", &mut settings.unity_version),
+            ("unity_cn_keys_file", &mut settings.unity_cn_keys_file),
+            ("xor_key", &mut settings.xor_key),
+            ("asset_index", &mut settings.asset_index),
+            ("schemas", &mut settings.schemas),
+            ("dummy_dlls", &mut settings.dummy_dlls),
+            ("cab_map", &mut settings.cab_map),
+            ("cab_base", &mut settings.cab_base),
+        ] {
+            *target = preference_string(load, name, if name == "game" { "Normal" } else { "" })?;
+        }
+        settings.continue_on_error = preference_bool(load, "continue_on_error", false)?;
+        settings.unity_cn_key_index = match load.get("unity_cn_key_index") {
+            None => 0,
+            Some(value) => value
+                .as_u64()
+                .filter(|index| *index < 1024)
+                .ok_or("Saved UnityCN key index is invalid.")? as usize,
+        };
+        settings.options()?;
+        let options = ExportOptions {
+            mode: match preference_string(export, "mode", "Convert")?.as_str() {
+                "Convert" => ExportMode::Convert,
+                "Raw" => ExportMode::Raw,
+                "Dump" => ExportMode::Dump,
+                "Json" => ExportMode::Json,
+                _ => return Err("Saved export mode is unknown.".to_owned()),
+            },
+            group: match preference_string(export, "group", "ByType")?.as_str() {
+                "ByType" => GroupMode::ByType,
+                "ByContainer" => GroupMode::ByContainer,
+                "BySource" => GroupMode::BySource,
+                "None" => GroupMode::None,
+                _ => return Err("Saved export grouping is unknown.".to_owned()),
+            },
+            image_format: match preference_string(export, "image_format", "Png")?.as_str() {
+                "Png" => ImageFormat::Png,
+                "Jpeg" => ImageFormat::Jpeg,
+                "Bmp" => ImageFormat::Bmp,
+                "Tga" => ImageFormat::Tga,
+                _ => return Err("Saved image format is unknown.".to_owned()),
+            },
+            overwrite: preference_bool(export, "overwrite", false)?,
+        };
+        let model_options = ModelExportOptions {
+            include_animations: preference_bool(export, "include_animations", true)?,
+            include_textures: preference_bool(export, "include_textures", true)?,
+        };
+        let image_zoom = match preview.get("image_zoom") {
+            None => 1.0,
+            Some(value) => value
+                .as_f64()
+                .filter(|zoom| (0.1..=8.0).contains(zoom))
+                .ok_or("Saved image zoom is invalid.")? as f32,
+        };
+        let image_fit = preference_bool(preview, "image_fit", true)?;
+        let mesh_mode = match preference_string(preview, "mesh_mode", "Shaded")?.as_str() {
+            "Shaded" => MeshMode::Shaded,
+            "Wireframe" => MeshMode::Wireframe,
+            "Combined" => MeshMode::Combined,
+            _ => return Err("Saved mesh display mode is unknown.".to_owned()),
+        };
+        let audio_volume = match preview.get("audio_volume") {
+            None => 0.8,
+            Some(value) => value
+                .as_f64()
+                .filter(|volume| (0.0..=1.0).contains(volume))
+                .ok_or("Saved audio volume is invalid.")? as f32,
+        };
+        let audio_loop = preference_bool(preview, "audio_loop", false)?;
+        // Apply only after every field has passed validation.
+        self.load_settings = settings;
+        self.export_options = options;
+        self.model_options = model_options;
+        self.image_zoom = image_zoom;
+        self.image_fit = image_fit;
+        self.mesh_mode = mesh_mode;
+        self.audio.set_volume(audio_volume);
+        self.audio.set_looping(audio_loop);
+        Ok(())
     }
 
     fn log(&mut self, error: bool, value: impl Into<String>) {
@@ -255,7 +457,7 @@ impl StudioApp {
             let _ = sender.send(result);
             context.request_repaint();
         }) {
-            Ok(_) => self.task = Some(Task { receiver, kind, label }),
+            Ok(_) => self.task = Some(Task { receiver, kind, label, generation: self.generation, revision: if kind == TaskKind::Audio { self.audio_revision } else { self.filter_revision } }),
             Err(error) => self.error(format!("Could not start a background operation: {error}")),
         }
     }
@@ -265,6 +467,8 @@ impl StudioApp {
             return;
         };
         let kind = task.kind;
+        let generation = task.generation;
+        let revision = task.revision;
         let result = match task.receiver.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
@@ -276,32 +480,46 @@ impl StudioApp {
         match result {
             Ok(TaskPayload::Loaded {
                 paths,
+                resolved_paths,
+                auxiliary_inputs,
                 session,
                 options,
+                catalog,
             }) => {
                 let Some(path) = paths.first().cloned() else {
                     self.error("The loader returned no input paths.");
                     return;
                 };
-                self.audio.stop();
+                self.stop_audio();
                 self.generation = self.generation.wrapping_add(1);
-                self.assets = session.assets().to_vec();
-                self.classes.clear();
-                for asset in &self.assets {
-                    *self.classes.entry(asset.class_name.clone()).or_default() += 1;
-                }
-                for diagnostic in session.diagnostics() {
+                self.assets = catalog.assets;
+                self.classes = catalog.classes;
+                self.by_key = catalog.by_key;
+                for diagnostic in session
+                    .diagnostics()
+                    .iter()
+                    .rev()
+                    .take(MAX_LOG_ENTRIES)
+                    .rev()
+                {
                     self.log(true, diagnostic.clone());
                 }
+                for warning in session.warnings().iter().rev().take(MAX_LOG_ENTRIES).rev() {
+                    self.log(false, format!("Advisory: {warning}"));
+                }
                 self.status = format!(
-                    "Loaded {} objects from {}.",
+                    "Loaded {} objects from {}. {} load issues, {} advisories.",
                     self.assets.len(),
-                    path.display()
+                    path.display(),
+                    session.diagnostics().len(),
+                    session.warnings().len(),
                 );
                 self.log(false, self.status.clone());
                 self.input_path = path.to_string_lossy().into_owned();
                 self.source = Some(path);
                 self.sources = paths;
+                self.resolved_sources = resolved_paths;
+                self.source_auxiliary = auxiliary_inputs;
                 self.source_options = options;
                 self.session = Some(session);
                 self.selected.clear();
@@ -309,6 +527,7 @@ impl StudioApp {
                 self.anchor = None;
                 self.preview = None;
                 self.pending_preview = None;
+                self.pending_channels = None;
                 self.scene.clear();
                 self.scene_rows.clear();
                 self.scene_loaded = false;
@@ -316,6 +535,36 @@ impl StudioApp {
                 self.pending_scene = self.tab == Tab::Hierarchy;
                 self.filter_dirty = true;
                 self.last_error = None;
+            }
+            Ok(TaskPayload::KeyNames { source, result }) => {
+                if self.load_settings.unity_cn_keys_file.trim() == source {
+                    match result {
+                        Ok(names) => self.unity_cn_names = names,
+                        Err(error) => {
+                            self.unity_cn_names.clear();
+                            self.error(error);
+                        }
+                    }
+                }
+            }
+            Ok(TaskPayload::Filtered {
+                generation,
+                revision,
+                result,
+            }) => {
+                if self.generation == generation && self.filter_revision == revision {
+                    self.pending_filter = false;
+                    match result {
+                        Ok(rows) => {
+                            self.visible = rows;
+                            self.filter_error = None;
+                        }
+                        Err(error) => {
+                            self.visible.clear();
+                            self.filter_error = Some(error);
+                        }
+                    }
+                }
             }
             Ok(TaskPayload::Preview {
                 generation,
@@ -327,7 +576,10 @@ impl StudioApp {
                         Preview::Text(text) => DisplayPreview::Text(text),
                         Preview::Mesh { vertices, indices } => {
                             match MeshPreview::new(vertices, indices) {
-                                Ok(mesh) => DisplayPreview::Mesh(mesh),
+                                Ok(mut mesh) => {
+                                    mesh.mode = self.mesh_mode;
+                                    DisplayPreview::Mesh(mesh)
+                                }
                                 Err(error) => DisplayPreview::Error(error),
                             }
                         }
@@ -335,21 +587,48 @@ impl StudioApp {
                             width,
                             height,
                             rgba,
-                        } => match checked_color_image(width, height, rgba) {
-                            Ok(image) => DisplayPreview::Image(context.load_texture(
-                                "asset-preview",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            )),
+                        } => match checked_color_image(width, height, &rgba) {
+                            Ok(image) => DisplayPreview::Image(ImagePreview {
+                                texture: context.load_texture(
+                                    "asset-preview",
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ),
+                                original: Arc::new(rgba),
+                                width,
+                                height,
+                                channels: Channels::default(),
+                                revision: 0,
+                            }),
                             Err(error) => DisplayPreview::Error(error),
                         },
                     });
                 }
             }
-            Ok(TaskPayload::Scene { generation, nodes }) => {
+            Ok(TaskPayload::ImageChannels {
+                generation,
+                key,
+                revision,
+                result,
+            }) => {
+                if view::preview_is_current(self.generation, generation, self.primary, key)
+                    && let Some(DisplayPreview::Image(image)) = &mut self.preview
+                    && image.revision == revision
+                {
+                    match result {
+                        Ok(pixels) => image.texture.set(pixels, egui::TextureOptions::LINEAR),
+                        Err(error) => self.error(error),
+                    }
+                }
+            }
+            Ok(TaskPayload::Scene {
+                generation,
+                nodes,
+                rows,
+            }) => {
                 if self.generation == generation {
                     self.pending_scene = false;
-                    self.scene_rows = hierarchy_order(&nodes);
+                    self.scene_rows = rows;
                     self.scene = nodes;
                     self.scene_loaded = true;
                     self.scene_error = None;
@@ -357,16 +636,19 @@ impl StudioApp {
             }
             Ok(TaskPayload::Audio {
                 generation,
+                revision,
                 key,
                 bytes,
             }) => {
                 if view::preview_is_current(self.generation, generation, self.primary, key)
+                    && self.audio_revision == revision
                     && let Err(error) = self.audio.play(bytes)
                 {
                     self.error(format!("Could not play this audio clip: {error}"));
                 }
             }
             Ok(TaskPayload::Report { operation, report }) => {
+                self.last_error = None;
                 self.status = format!(
                     "{operation}: {} written, {} skipped, {} failed.",
                     report.written.len(),
@@ -395,6 +677,14 @@ impl StudioApp {
                 }
             }
             Err(error) => match kind {
+                TaskKind::Filter => {
+                    if self.generation == generation && self.filter_revision == revision {
+                        self.pending_filter = false;
+                        self.visible.clear();
+                        self.filter_error = Some(error.clone());
+                    }
+                    self.log(true, error);
+                }
                 TaskKind::Preview => {
                     // Selection can change while a preview is loading. Do not attach
                     // an old object's error to the newly selected object.
@@ -409,13 +699,63 @@ impl StudioApp {
                     self.scene_loaded = true;
                     self.log(true, error);
                 }
+                TaskKind::Audio => {
+                    if self.generation == generation && self.audio_revision == revision {
+                        self.error(error);
+                    }
+                }
                 _ => self.error(error),
             },
         }
     }
 
+    fn queue_filter(&mut self) {
+        self.filter_revision = self.filter_revision.wrapping_add(1);
+        self.pending_filter = true;
+        self.visible.clear();
+        self.filter_error = None;
+    }
+
     fn start_pending(&mut self, context: &egui::Context) {
         if self.task.is_some() {
+            return;
+        }
+        if self.pending_filter {
+            self.pending_filter = false;
+            let assets = self.assets.clone();
+            let filters = self.filters.clone();
+            let sort = self.sort;
+            let descending = self.descending;
+            let generation = self.generation;
+            let revision = self.filter_revision;
+            self.start_task(
+                TaskKind::Filter,
+                "Updating asset list…",
+                context,
+                move || {
+                    Ok(TaskPayload::Filtered {
+                        generation,
+                        revision,
+                        result: view::visible_rows(&assets, &filters, sort, descending),
+                    })
+                },
+            );
+            return;
+        }
+        if let Some(source) = self.pending_key_names.take() {
+            self.start_task(
+                TaskKind::KeyList,
+                "Reading UnityCN key names…",
+                context,
+                move || {
+                    let result = key_resource_path(&source).and_then(|path| {
+                        let keys = assetstudio_core::unity_cn_keys::UnityCnKeys::from_path(&path)
+                            .map_err(|error| error.to_string())?;
+                        Ok(keys.names().map(str::to_owned).collect())
+                    });
+                    Ok(TaskPayload::KeyNames { source, result })
+                },
+            );
             return;
         }
         if self.pending_scene {
@@ -429,12 +769,45 @@ impl StudioApp {
                     move || {
                         session
                             .scene()
-                            .map(|nodes| TaskPayload::Scene { generation, nodes })
+                            .map(|nodes| {
+                                let rows = hierarchy_order(&nodes);
+                                TaskPayload::Scene {
+                                    generation,
+                                    nodes,
+                                    rows,
+                                }
+                            })
                             .map_err(|error| error.to_string())
                     },
                 );
                 return;
             }
+        }
+        if let Some((key, revision)) = self.pending_channels.take()
+            && self.primary == Some(key)
+            && let Some(DisplayPreview::Image(image)) = &self.preview
+            && image.revision == revision
+        {
+            let original = image.original.clone();
+            let channels = image.channels;
+            let (width, height) = (image.width, image.height);
+            let generation = self.generation;
+            self.start_task(
+                TaskKind::ImageChannels,
+                "Updating image channels…",
+                context,
+                move || {
+                    let result = preview_image::apply_channels(&original, channels)
+                        .and_then(|rgba| checked_color_image(width, height, &rgba));
+                    Ok(TaskPayload::ImageChannels {
+                        generation,
+                        key,
+                        revision,
+                        result,
+                    })
+                },
+            );
+            return;
         }
         if let Some(key) = self.pending_preview.take()
             && self.primary == Some(key)
@@ -470,7 +843,7 @@ impl StudioApp {
         if self.task.is_some() {
             return;
         }
-        let options = match self.load_settings.options() {
+        let mut options = match self.load_settings.options() {
             Ok(options) => options,
             Err(error) => {
                 self.error(error);
@@ -479,11 +852,36 @@ impl StudioApp {
         };
         let asset_index = nonempty(&self.load_settings.asset_index).map(PathBuf::from);
         let schemas = nonempty(&self.load_settings.schemas).map(PathBuf::from);
-        self.audio.stop();
+        let dummy_dlls = nonempty(&self.load_settings.dummy_dlls).map(PathBuf::from);
+        let cab_map = nonempty(&self.load_settings.cab_map).map(PathBuf::from);
+        let cab_base = nonempty(&self.load_settings.cab_base).map(PathBuf::from);
+        let key_specification = self.load_settings.unity_cn_keys_file.trim().to_owned();
+        let key_index = self.load_settings.unity_cn_key_index;
+        let cab_source = cab_map.clone();
+        self.stop_audio();
         self.pending_preview = None;
         self.start_task(TaskKind::Load, "Opening assets…", context, move || {
-            let mut session =
-                Session::open_paths(&paths, &options).map_err(|error| error.to_string())?;
+            let mut auxiliary_inputs = Vec::new();
+            let key_source = resolve_resource_key(&mut options, &key_specification, key_index)?;
+            let resolved_paths = if let Some(map_path) = cab_map {
+                let base = cab_base_for_inputs(&paths, cab_base)?;
+                let map =
+                    assetstudio_core::cab_map::CabMap::from_path(&map_path).map_err(|error| {
+                        format!("Could not load CAB map {}: {error}", map_path.display())
+                    })?;
+                map.resolve_paths(&paths, Some(&base))
+                    .map_err(|error| format!("Could not resolve CAB dependencies: {error}"))?
+            } else {
+                paths.clone()
+            };
+            let mut session = Session::open_paths(&resolved_paths, &options)
+                .map_err(|error| error.to_string())?;
+            for auxiliary in key_source.iter().chain(cab_source.iter()) {
+                session
+                    .protect_input_path(auxiliary)
+                    .map_err(|error| error.to_string())?;
+                auxiliary_inputs.push(auxiliary.clone());
+            }
             if let Some(index) = asset_index {
                 session.recover_containers(&index).map_err(|error| {
                     format!(
@@ -491,6 +889,7 @@ impl StudioApp {
                         index.display()
                     )
                 })?;
+                auxiliary_inputs.push(index);
             }
             if let Some(schema) = schemas {
                 session.load_schemas(&schema).map_err(|error| {
@@ -499,11 +898,29 @@ impl StudioApp {
                         schema.display()
                     )
                 })?;
+                auxiliary_inputs.push(schema);
             }
+            if let Some(folder) = dummy_dlls {
+                let generator = assetstudio_core::schema::sibling_cli_executable()
+                    .map_err(|error| error.to_string())?;
+                session
+                    .load_dummy_dlls(&folder, &generator)
+                    .map_err(|error| {
+                        format!(
+                            "Could not load behaviour layouts from {}: {error}",
+                            folder.display()
+                        )
+                    })?;
+                auxiliary_inputs.push(folder);
+            }
+            let catalog = Catalog::prepare(session.assets())?;
             Ok(TaskPayload::Loaded {
                 paths,
+                resolved_paths,
+                auxiliary_inputs,
                 session: Arc::new(session),
                 options,
+                catalog,
             })
         });
     }
@@ -527,12 +944,11 @@ impl StudioApp {
     }
 
     fn request_preview(&mut self, key: Option<AssetKey>) {
-        self.audio.stop();
+        self.stop_audio();
         self.primary = key;
         self.preview = None;
         self.pending_preview = key;
-        self.image_zoom = 1.0;
-        self.image_fit = true;
+        self.pending_channels = None;
     }
 
     fn ordered_keys(&self) -> Vec<AssetKey> {
@@ -564,6 +980,7 @@ impl StudioApp {
             return;
         };
         let options = self.export_options;
+        let model_options = self.model_options;
         self.pending_preview = None;
         self.start_task(
             TaskKind::Export,
@@ -571,7 +988,7 @@ impl StudioApp {
             context,
             move || {
                 session
-                    .export(&keys, &output, &options)
+                    .export_with_model_options(&keys, &output, &options, &model_options)
                     .map(|report| TaskPayload::Report {
                         operation: "Export",
                         report,
@@ -646,13 +1063,14 @@ impl StudioApp {
             return;
         };
         self.pending_preview = None;
+        let model_options = self.model_options;
         self.start_task(
             TaskKind::Export,
             "Exporting scene and textures…",
             context,
             move || {
                 session
-                    .export_scene(&output, format, &roots)
+                    .export_scene_with_options(&output, format, &roots, &model_options)
                     .map(|report| TaskPayload::Report {
                         operation: "Scene export",
                         report,
@@ -662,9 +1080,53 @@ impl StudioApp {
         );
     }
 
+    fn export_cab_map(&mut self, context: &egui::Context) {
+        if self.task.is_some() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(base) = rfd::FileDialog::new()
+            .set_title("Choose folder containing the loaded source files")
+            .pick_folder()
+        else {
+            return;
+        };
+        let Some(output) = rfd::FileDialog::new()
+            .set_title("Save CAB dependency map")
+            .set_file_name("cab_map.bin")
+            .add_filter("CAB dependency map", &["bin"])
+            .save_file()
+        else {
+            return;
+        };
+        let overwrite = self.export_options.overwrite;
+        self.pending_preview = None;
+        self.start_task(
+            TaskKind::Export,
+            "Writing CAB dependency map…",
+            context,
+            move || {
+                session
+                    .write_cab_map(&base, &output, overwrite)
+                    .map(|report| TaskPayload::Report {
+                        operation: "CAB dependency map",
+                        report,
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        );
+    }
+
     fn extract(&mut self, context: &egui::Context) {
-        if !self.sources.is_empty() {
-            self.extract_inputs(self.sources.clone(), self.source_options.clone(), context);
+        if !self.resolved_sources.is_empty() {
+            self.extract_inputs(
+                self.resolved_sources.clone(),
+                self.source_options.clone(),
+                self.source_auxiliary.clone(),
+                context,
+            );
         }
     }
 
@@ -691,13 +1153,14 @@ impl StudioApp {
     }
 
     fn extract_input(&mut self, input: PathBuf, options: LoadOptions, context: &egui::Context) {
-        self.extract_inputs(vec![input], options, context);
+        self.extract_inputs(vec![input], options, Vec::new(), context);
     }
 
     fn extract_inputs(
         &mut self,
         inputs: Vec<PathBuf>,
-        options: LoadOptions,
+        mut options: LoadOptions,
+        mut auxiliary: Vec<PathBuf>,
         context: &egui::Context,
     ) {
         if self.task.is_some() {
@@ -710,32 +1173,27 @@ impl StudioApp {
             return;
         };
         let overwrite = self.export_options.overwrite;
+        let key_specification = self.load_settings.unity_cn_keys_file.trim().to_owned();
+        let key_index = self.load_settings.unity_cn_key_index;
         self.pending_preview = None;
         self.start_task(
             TaskKind::Export,
             "Extracting container files…",
             context,
             move || {
-                let mut report = OperationReport::default();
-                for (index, input) in inputs.iter().enumerate() {
-                    let root = if inputs.len() == 1 {
-                        output.clone()
-                    } else {
-                        output.join(format!("input-{:04}", index + 1))
-                    };
-                    match Session::extract(input, &root, &options, overwrite) {
-                        Ok(mut part) => {
-                            report.written.append(&mut part.written);
-                            report.skipped.append(&mut part.skipped);
-                            report.failed.append(&mut part.failed);
-                        }
-                        Err(error) => report.failed.push(format!("{}: {error}", input.display())),
-                    }
+                if let Some(keyfile) =
+                    resolve_resource_key(&mut options, &key_specification, key_index)?
+                {
+                    auxiliary.push(keyfile);
                 }
-                Ok(TaskPayload::Report {
+                Session::extract_paths_with_auxiliary_inputs(
+                    &inputs, &output, &options, overwrite, &auxiliary,
+                )
+                .map(|report| TaskPayload::Report {
                     operation: "Extraction",
                     report,
                 })
+                .map_err(|error| error.to_string())
             },
         );
     }
@@ -747,18 +1205,26 @@ impl StudioApp {
         let (Some(key), Some(session)) = (self.primary, self.session.clone()) else {
             return;
         };
+        self.stop_audio();
         let generation = self.generation;
+        let revision = self.audio_revision;
         self.pending_preview = None;
         self.start_task(TaskKind::Audio, "Decoding audio…", context, move || {
             session
                 .audio_preview(key)
                 .map(|bytes| TaskPayload::Audio {
                     generation,
+                    revision,
                     key,
                     bytes,
                 })
                 .map_err(|error| error.to_string())
         });
+    }
+
+    fn stop_audio(&mut self) {
+        self.audio_revision = self.audio_revision.wrapping_add(1);
+        self.audio.stop();
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -848,6 +1314,10 @@ impl StudioApp {
                     if ui.button("Filtered asset list · XML").clicked() {
                         ui.close();
                         self.export_map(MapFormat::Xml, &context);
+                    }
+                    if ui.button("CAB dependency map · binary").clicked() {
+                        ui.close();
+                        self.export_cab_map(&context);
                     }
                     ui.separator();
                     if ui.button("Entire scene · FBX binary").clicked() {
@@ -1005,6 +1475,15 @@ impl StudioApp {
                 }
             });
         ui.add_space(8.0);
+        ui.checkbox(
+            &mut self.model_options.include_animations,
+            "Include model animations",
+        );
+        ui.checkbox(
+            &mut self.model_options.include_textures,
+            "Include model textures",
+        );
+        ui.add_space(5.0);
         ui.checkbox(&mut self.export_options.overwrite, "Replace existing files");
         if self.export_options.overwrite {
             ui.label(
@@ -1311,7 +1790,11 @@ impl StudioApp {
             });
             return;
         };
-        let Some(asset) = self.assets.iter().find(|asset| asset.key == key) else {
+        let Some(asset) = self
+            .by_key
+            .get(&key)
+            .and_then(|&index| self.assets.get(index))
+        else {
             return;
         };
         ui.label(RichText::new(&asset.name).size(19.0).strong());
@@ -1365,21 +1848,36 @@ impl StudioApp {
                     self.audio.resume();
                 }
                 if ui.button("Stop").clicked() {
-                    self.audio.stop();
+                    self.stop_audio();
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut volume = self.audio.volume();
+                if ui
+                    .add(egui::Slider::new(&mut volume, 0.0..=1.0).text("Volume"))
+                    .changed()
+                {
+                    self.audio.set_volume(volume);
+                }
+                let mut looping = self.audio.is_looping();
+                if ui.checkbox(&mut looping, "Loop").changed() {
+                    self.audio.set_looping(looping);
                 }
             });
             if self.audio.is_playing() || self.audio.is_paused() {
-                let position = self.audio.position().as_secs_f32();
+                let mut position = self.audio.position().as_secs_f32();
                 if let Some(duration) = self.audio.duration() {
-                    ui.add(
-                        egui::ProgressBar::new(
-                            (position / duration.as_secs_f32().max(0.001)).clamp(0.0, 1.0),
-                        )
-                        .text(format!(
-                            "{position:.1} / {:.1} seconds",
-                            duration.as_secs_f32()
-                        )),
-                    );
+                    let length = duration.as_secs_f32();
+                    if length > 0.0
+                        && ui
+                            .add(egui::Slider::new(&mut position, 0.0..=length).text("Seconds"))
+                            .changed()
+                        && let Err(error) = self
+                            .audio
+                            .seek(Duration::from_secs_f32(position.clamp(0.0, length)))
+                    {
+                        self.error(format!("Could not seek this audio clip: {error}"));
+                    }
                 } else {
                     ui.label(format!("{position:.1} seconds"));
                 }
@@ -1426,7 +1924,35 @@ impl StudioApp {
                         );
                     });
             }
-            Some(DisplayPreview::Image(texture)) => {
+            Some(DisplayPreview::Image(image)) => {
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Channels");
+                    for (label, channel, shortcut) in [
+                        ("R", &mut image.channels.red, egui::Key::R),
+                        ("G", &mut image.channels.green, egui::Key::G),
+                        ("B", &mut image.channels.blue, egui::Key::B),
+                        ("A", &mut image.channels.alpha, egui::Key::A),
+                    ] {
+                        changed |= ui.checkbox(channel, label).changed();
+                        if !ui.ctx().wants_keyboard_input()
+                            && ui.input_mut(|input| {
+                                input.consume_shortcut(&egui::KeyboardShortcut::new(
+                                    egui::Modifiers::COMMAND,
+                                    shortcut,
+                                ))
+                            })
+                        {
+                            *channel = !*channel;
+                            changed = true;
+                        }
+                    }
+                });
+                if changed {
+                    image.revision = image.revision.wrapping_add(1);
+                    self.pending_channels = Some((key, image.revision));
+                }
+                let texture = &image.texture;
                 ui.horizontal(|ui| {
                     ui.label(format!("{} × {}", texture.size()[0], texture.size()[1]));
                     ui.checkbox(&mut self.image_fit, "Fit");
@@ -1462,6 +1988,19 @@ impl StudioApp {
                     });
             }
             Some(DisplayPreview::Mesh(mesh)) => {
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (MeshMode::Shaded, "Shaded"),
+                        (MeshMode::Wireframe, "Wireframe"),
+                        (MeshMode::Combined, "Both"),
+                    ] {
+                        ui.selectable_value(&mut mesh.mode, mode, label);
+                    }
+                    if ui.small_button("Reset view").clicked() {
+                        mesh.reset_camera();
+                    }
+                });
+                self.mesh_mode = mesh.mode;
                 ui.label(
                     RichText::new(format!(
                         "{} vertices · {} triangles",
@@ -1472,7 +2011,7 @@ impl StudioApp {
                     .color(MUTED),
                 );
                 ui.label(
-                    RichText::new("Drag to rotate · scroll to zoom")
+                    RichText::new("Drag to rotate · right drag to pan · scroll to zoom")
                         .small()
                         .color(MUTED),
                 );
@@ -1490,21 +2029,50 @@ impl StudioApp {
                     Sense::drag(),
                 );
                 ui.painter().rect_filled(rect, 6.0, BACKGROUND);
-                if response.dragged() {
+                if response.dragged_by(egui::PointerButton::Primary) {
                     let delta = response.drag_delta();
                     mesh.yaw += delta.x * 0.01;
                     mesh.pitch = (mesh.pitch + delta.y * 0.01).clamp(-1.5, 1.5);
+                }
+                if response.dragged_by(egui::PointerButton::Secondary) {
+                    let delta = response.drag_delta();
+                    mesh.pan[0] = (mesh.pan[0] + delta.x).clamp(-100_000.0, 100_000.0);
+                    mesh.pan[1] = (mesh.pan[1] + delta.y).clamp(-100_000.0, 100_000.0);
                 }
                 if response.hovered() {
                     let scroll = ui.input(|input| input.smooth_scroll_delta.y);
                     mesh.zoom = (mesh.zoom * (scroll * 0.002).exp()).clamp(0.2, 8.0);
                 }
                 let painter = ui.painter().with_clip_rect(rect);
-                for line in mesh.lines(rect) {
-                    painter.line_segment(
-                        line,
-                        egui::Stroke::new(0.8_f32, ACCENT.gamma_multiply(0.65)),
-                    );
+                match mesh.faces(rect) {
+                    Ok(faces) => {
+                        for face in faces {
+                            let fill = if mesh.mode == MeshMode::Wireframe {
+                                Color32::TRANSPARENT
+                            } else {
+                                ACCENT.gamma_multiply(face.brightness)
+                            };
+                            let stroke = if mesh.mode == MeshMode::Shaded {
+                                egui::Stroke::NONE
+                            } else {
+                                egui::Stroke::new(0.8_f32, Color32::from_rgb(118, 180, 173))
+                            };
+                            painter.add(egui::Shape::convex_polygon(
+                                face.points.to_vec(),
+                                fill,
+                                stroke,
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            error,
+                            FontId::proportional(14.0),
+                            Color32::LIGHT_RED,
+                        );
+                    }
                 }
             }
         }
@@ -1512,7 +2080,7 @@ impl StudioApp {
 
     fn settings_window(&mut self, context: &egui::Context) {
         let mut open = self.settings_open;
-        egui::Window::new("Load settings").open(&mut open).collapsible(false).resizable(false).default_width(430.0).show(context, |ui| {
+        egui::Window::new("Load settings").open(&mut open).collapsible(false).resizable(false).default_width(470.0).vscroll(true).max_height((context.content_rect().height() - 60.0).max(240.0)).show(context, |ui| {
             ui.label("Changes apply the next time you open or reload assets.");
             ui.add_space(10.0);
             egui::Grid::new("load-settings").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
@@ -1524,7 +2092,37 @@ impl StudioApp {
                 });
                 ui.end_row();
                 ui.label("Unity version override"); ui.add(TextEdit::singleline(&mut self.load_settings.unity_version).hint_text("Use the version stored in the file")); ui.end_row();
-                ui.label("UnityCN key"); ui.add(TextEdit::singleline(&mut self.load_settings.unity_cn_key).password(true).hint_text("32 hexadecimal characters")); ui.end_row();
+                ui.label("UnityCN key file");
+                ui.horizontal(|ui| {
+                    let response = ui.add(TextEdit::singleline(&mut self.load_settings.unity_cn_keys_file).hint_text("Blank: Keys.json beside the applications").desired_width(180.0));
+                    if response.changed() { self.unity_cn_names.clear(); }
+                    if ui.small_button("Browse…").clicked()
+                        && let Some(path) = rfd::FileDialog::new().add_filter("UnityCN key file", &["json"]).pick_file()
+                    {
+                        self.load_settings.unity_cn_keys_file = path.to_string_lossy().into_owned();
+                        self.unity_cn_names.clear();
+                        self.pending_key_names = Some(self.load_settings.unity_cn_keys_file.trim().to_owned());
+                    }
+                });
+                ui.end_row();
+                ui.label("UnityCN key selection");
+                ui.horizontal(|ui| {
+                    if self.unity_cn_names.is_empty() {
+                        ui.add(egui::DragValue::new(&mut self.load_settings.unity_cn_key_index).range(0..=1023).prefix("Index "));
+                    } else {
+                        let selected = self.unity_cn_names.get(self.load_settings.unity_cn_key_index).map_or_else(|| format!("Index {} (unavailable)", self.load_settings.unity_cn_key_index), |name| format!("{}: {name}", self.load_settings.unity_cn_key_index));
+                        egui::ComboBox::from_id_salt("unity-cn-key-index").selected_text(selected).width(180.0).show_ui(ui, |ui| {
+                            for (index, name) in self.unity_cn_names.iter().enumerate() {
+                                ui.selectable_value(&mut self.load_settings.unity_cn_key_index, index, format!("{index}: {name}"));
+                            }
+                        });
+                    }
+                    if ui.small_button("Load names").clicked() {
+                        self.pending_key_names = Some(self.load_settings.unity_cn_keys_file.trim().to_owned());
+                    }
+                });
+                ui.end_row();
+                ui.label("Explicit UnityCN key"); ui.add(TextEdit::singleline(&mut self.load_settings.unity_cn_key).password(true).hint_text("Overrides the selected resource key")); ui.end_row();
                 ui.label("Binary data XOR key"); ui.add(TextEdit::singleline(&mut self.load_settings.xor_key).hint_text("0 or 0x00")); ui.end_row();
                 ui.label("Asset index JSON");
                 ui.horizontal(|ui| {
@@ -1542,8 +2140,35 @@ impl StudioApp {
                     { self.load_settings.schemas = path.to_string_lossy().into_owned(); }
                 });
                 ui.end_row();
+                ui.label("Managed assemblies");
+                ui.horizontal(|ui| {
+                    ui.add(TextEdit::singleline(&mut self.load_settings.dummy_dlls).hint_text("Folder containing Assembly-CSharp.dll").desired_width(180.0));
+                    if ui.small_button("Browse…").clicked()
+                        && let Some(path) = rfd::FileDialog::new().set_title("Choose managed assembly folder").pick_folder()
+                    { self.load_settings.dummy_dlls = path.to_string_lossy().into_owned(); }
+                });
+                ui.end_row();
+                ui.label("CAB dependency map");
+                ui.horizontal(|ui| {
+                    ui.add(TextEdit::singleline(&mut self.load_settings.cab_map).hint_text("Optional CAB map .bin file").desired_width(180.0));
+                    if ui.small_button("Browse…").clicked()
+                        && let Some(path) = rfd::FileDialog::new().add_filter("CAB map", &["bin"]).pick_file()
+                    { self.load_settings.cab_map = path.to_string_lossy().into_owned(); }
+                });
+                ui.end_row();
+                ui.label("CAB base folder");
+                ui.add_enabled_ui(!self.load_settings.cab_map.trim().is_empty(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(TextEdit::singleline(&mut self.load_settings.cab_base).hint_text("Blank: source folder / common parent").desired_width(180.0));
+                        if ui.small_button("Browse…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().set_title("Choose CAB base folder").pick_folder()
+                        { self.load_settings.cab_base = path.to_string_lossy().into_owned(); }
+                    });
+                });
+                ui.end_row();
             });
             ui.add_space(10.0);
+            ui.label(RichText::new("UnityCN uses the selected file/index when the explicit key is blank. An explicit key takes precedence.").small().color(MUTED));
             ui.checkbox(&mut self.load_settings.continue_on_error, "Continue loading other files after an error");
             ui.label(RichText::new("Any skipped or unrecognized files are listed in the activity log.").small().color(MUTED));
             if let Err(error) = self.load_settings.options() { ui.colored_label(Color32::LIGHT_RED, error); }
@@ -1616,16 +2241,7 @@ impl StudioApp {
         self.poll_task(context);
         if self.filter_dirty {
             self.filter_dirty = false;
-            match view::visible_rows(&self.assets, &self.filters, self.sort, self.descending) {
-                Ok(rows) => {
-                    self.visible = rows;
-                    self.filter_error = None;
-                }
-                Err(error) => {
-                    self.visible.clear();
-                    self.filter_error = Some(error);
-                }
-            }
+            self.queue_filter();
         }
         if self.task.is_none() {
             let dropped = context.input(|input| {
@@ -1796,6 +2412,10 @@ impl StudioApp {
                 ACCENT,
             );
         }
+        if self.filter_dirty {
+            self.filter_dirty = false;
+            self.queue_filter();
+        }
         self.start_pending(context);
         if self.task.is_some() || self.audio.is_playing() {
             context.request_repaint_after(Duration::from_millis(80));
@@ -1807,9 +2427,110 @@ impl eframe::App for StudioApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.show(context);
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let result = (|| {
+            let path = crate::preferences::settings_path()?;
+            if let Some(session) = &self.session {
+                session
+                    .check_output_target(&path)
+                    .map_err(|error| error.to_string())?;
+            }
+            crate::preferences::save(&self.preferences_value())
+        })();
+        if let Err(error) = result {
+            eprintln!("AssetStudio could not save settings: {error}");
+        }
+    }
 }
 
-fn checked_color_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<egui::ColorImage, String> {
+fn preference_string(
+    value: &serde_json::Value,
+    name: &str,
+    default: &str,
+) -> Result<String, String> {
+    match value.get(name) {
+        None => Ok(default.to_owned()),
+        Some(value) => value
+            .as_str()
+            .filter(|text| text.len() <= 4096 && !text.contains('\0'))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Saved setting {name:?} is invalid.")),
+    }
+}
+
+fn preference_bool(value: &serde_json::Value, name: &str, default: bool) -> Result<bool, String> {
+    match value.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("Saved setting {name:?} is invalid.")),
+    }
+}
+
+fn key_resource_path(specification: &str) -> Result<PathBuf, String> {
+    if !specification.trim().is_empty() {
+        return Ok(PathBuf::from(specification.trim()));
+    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    assetstudio_core::unity_cn_keys::UnityCnKeys::beside_executable(&executable)
+        .map_err(|error| error.to_string())
+}
+
+/// Called only inside the load worker. An explicit key must not cause any
+/// unrelated resource file to be opened, and key bytes never become messages.
+fn resolve_resource_key(
+    options: &mut LoadOptions,
+    specification: &str,
+    index: usize,
+) -> Result<Option<PathBuf>, String> {
+    if !options.game.eq_ignore_ascii_case("UnityCN") || options.unity_cn_key.is_some() {
+        return Ok(None);
+    }
+    let path = key_resource_path(specification)?;
+    let keys = assetstudio_core::unity_cn_keys::UnityCnKeys::from_path(&path)
+        .map_err(|error| error.to_string())?;
+    options.unity_cn_key = Some(
+        keys.key(index)
+            .map_err(|error| error.to_string())?
+            .to_owned(),
+    );
+    Ok(Some(path))
+}
+
+fn cab_base_for_inputs(inputs: &[PathBuf], explicit: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(base) = explicit {
+        return Ok(base);
+    }
+    let mut directories = inputs.iter().map(|input| {
+        let path = input.canonicalize().map_err(|error| {
+            format!("Could not inspect CAB source {}: {error}", input.display())
+        })?;
+        if path.is_dir() {
+            Ok(path)
+        } else {
+            path.parent()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| "The selected source has no parent folder.".to_owned())
+        }
+    });
+    let mut base = directories
+        .next()
+        .ok_or("Select at least one input before loading a CAB map.")??;
+    for directory in directories {
+        let directory = directory?;
+        while !directory.starts_with(&base) {
+            if !base.pop() || base.as_os_str().is_empty() {
+                return Err(
+                    "Choose a CAB base folder that contains every selected input.".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(base)
+}
+
+fn checked_color_image(width: u32, height: u32, rgba: &[u8]) -> Result<egui::ColorImage, String> {
     let width = usize::try_from(width).map_err(|_| "Image width exceeds this platform's limit.")?;
     let height =
         usize::try_from(height).map_err(|_| "Image height exceeds this platform's limit.")?;
@@ -1822,7 +2543,7 @@ fn checked_color_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<egui::C
     }
     Ok(egui::ColorImage::from_rgba_unmultiplied(
         [width, height],
-        &rgba,
+        rgba,
     ))
 }
 
@@ -1979,6 +2700,446 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preferences_round_trip_without_saving_explicit_decryption_key() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.load_settings.game = "UnityCN".to_owned();
+        app.load_settings.unity_cn_key = "11".repeat(16);
+        app.load_settings.unity_cn_keys_file = "public-keys.json".to_owned();
+        app.load_settings.unity_cn_key_index = 3;
+        app.export_options.mode = ExportMode::Raw;
+        app.export_options.group = GroupMode::ByContainer;
+        app.export_options.image_format = ImageFormat::Tga;
+        app.model_options.include_animations = false;
+        app.image_fit = false;
+        app.image_zoom = 2.0;
+        app.mesh_mode = MeshMode::Combined;
+        let value = app.preferences_value();
+        assert!(!value.to_string().contains(&app.load_settings.unity_cn_key));
+        assert!(value["load"].get("unity_cn_key").is_none());
+        let mut restored = StudioApp::new(&context, None);
+        restored.apply_preferences(&value).unwrap();
+        assert_eq!(restored.preferences_value(), value);
+        assert!(restored.load_settings.unity_cn_key.is_empty());
+        restored.request_preview(Some(AssetKey {
+            file_index: 0,
+            path_id: 1,
+        }));
+        assert_eq!(restored.image_zoom, 2.0);
+        assert!(!restored.image_fit);
+    }
+
+    #[test]
+    fn invalid_preferences_are_rejected_before_any_settings_are_changed() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let previous = app.preferences_value();
+        for value in [
+            serde_json::json!({"load":{"game":"Normal"},"export":{"mode":"Bogus"}}),
+            serde_json::json!({"load":{"unity_cn_key_index":1024}}),
+            serde_json::json!({"preview":{"image_zoom":0}}),
+            serde_json::json!({"load":[]}),
+        ] {
+            assert!(app.apply_preferences(&value).is_err());
+            assert_eq!(app.preferences_value(), previous);
+        }
+        app.apply_preferences(
+            &serde_json::json!({"load":{"unity_cn_key":"ignored"},"future":true}),
+        )
+        .unwrap();
+        assert!(app.load_settings.unity_cn_key.is_empty());
+    }
+
+    #[test]
+    fn image_channel_results_cannot_cross_channel_or_selection_changes() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 28,
+        };
+        app.primary = Some(key);
+        app.preview = Some(DisplayPreview::Image(ImagePreview {
+            texture: context.load_texture(
+                "test-image",
+                checked_color_image(1, 1, &[1, 2, 3, 255]).unwrap(),
+                egui::TextureOptions::LINEAR,
+            ),
+            original: Arc::new(vec![1, 2, 3, 255]),
+            width: 1,
+            height: 1,
+            channels: Channels::default(),
+            revision: 2,
+        }));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(TaskPayload::ImageChannels {
+                generation: app.generation,
+                key,
+                revision: 1,
+                result: Err("obsolete image mask".to_owned()),
+            }))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::ImageChannels,
+            label: "Test mask",
+            generation: app.generation,
+            revision: 0,
+        });
+        app.poll_task(&context);
+        assert!(app.last_error.is_none());
+        assert!(
+            matches!(&app.preview,Some(DisplayPreview::Image(image)) if image.revision==2 && image.original.as_slice()==[1,2,3,255])
+        );
+        app.request_preview(None);
+        assert!(app.pending_channels.is_none());
+        assert!(app.preview.is_none());
+    }
+
+    #[test]
+    fn stopping_audio_invalidates_a_pending_decode_and_its_errors() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 83,
+        };
+        app.primary = Some(key);
+        let obsolete = app.audio_revision;
+        app.stop_audio();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(TaskPayload::Audio {
+                generation: app.generation,
+                revision: obsolete,
+                key,
+                // Invalid WAV would report an error if stale playback were attempted.
+                bytes: Vec::new(),
+            }))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::Audio,
+            label: "Test audio",
+            generation: app.generation,
+            revision: obsolete,
+        });
+        app.poll_task(&context);
+        assert!(app.last_error.is_none());
+        assert!(!app.audio.is_playing());
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Err("obsolete decoder failure".to_owned()))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::Audio,
+            label: "Test audio",
+            generation: app.generation,
+            revision: obsolete,
+        });
+        app.poll_task(&context);
+        assert!(app.last_error.is_none());
+        assert!(app.log.is_empty());
+    }
+
+    #[test]
+    fn returning_to_same_selection_cannot_revive_older_audio() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 83,
+        };
+        app.request_preview(Some(key));
+        let revision = app.audio_revision;
+        app.request_preview(None);
+        app.request_preview(Some(key));
+        assert_ne!(app.audio_revision, revision);
+    }
+
+    #[test]
+    fn explicit_unity_cn_key_takes_precedence_without_opening_resource() {
+        let explicit = "12".repeat(16);
+        let mut options = LoadOptions {
+            game: "UnityCN".to_owned(),
+            unity_cn_key: Some(explicit.clone()),
+            ..Default::default()
+        };
+        assert!(
+            resolve_resource_key(
+                &mut options,
+                "this-key-file-does-not-exist.json",
+                usize::MAX
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(options.unity_cn_key.as_deref() == Some(explicit.as_str()));
+    }
+
+    #[test]
+    fn indexed_unity_cn_key_reads_selected_entry_and_never_falls_back() {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(br#"[{"Name":"First","Key":"11111111111111111111111111111111"},{"Name":"Second","Key":"22222222222222222222222222222222"}]"#).unwrap();
+        file.flush().unwrap();
+        let specification = file.path().to_str().unwrap();
+        let mut options = LoadOptions {
+            game: "UnityCN".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_resource_key(&mut options, specification, 1)
+                .unwrap()
+                .as_deref(),
+            Some(file.path())
+        );
+        assert!(options.unity_cn_key.as_deref() == Some("22222222222222222222222222222222"));
+        options.unity_cn_key = None;
+        let error = resolve_resource_key(&mut options, specification, 2).unwrap_err();
+        assert!(options.unity_cn_key.is_none());
+        assert!(!error.contains("22222222222222222222222222222222"));
+        assert!(!error.contains("11111111111111111111111111111111"));
+    }
+
+    #[test]
+    fn stale_unity_cn_name_results_cannot_replace_new_resource_selection() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.load_settings.unity_cn_keys_file = "new.json".to_owned();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(TaskPayload::KeyNames {
+                source: "old.json".to_owned(),
+                result: Err("obsolete missing file".to_owned()),
+            }))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::KeyList,
+            label: "Test",
+            generation: 0,
+            revision: 0,
+        });
+        app.poll_task(&context);
+        assert!(app.last_error.is_none());
+        assert!(app.unity_cn_names.is_empty());
+    }
+
+    #[test]
+    fn indexed_unity_cn_settings_validate_without_reading_a_file_on_ui_thread() {
+        let settings = LoadSettings {
+            game: "UnityCN".to_owned(),
+            unity_cn_keys_file: "missing-resource.json".to_owned(),
+            ..Default::default()
+        };
+        let options = settings.options().unwrap();
+        assert_eq!(options.game, "UnityCN");
+        assert!(options.unity_cn_key.is_none());
+        // Actual key file validation and selection happen in the worker.
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.settings_open = true;
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |context| app.show(context),
+        );
+        assert!(!output.shapes.is_empty());
+        assert!(app.task.is_none());
+    }
+
+    fn finish_filter(
+        app: &mut StudioApp,
+        context: &egui::Context,
+        generation: u64,
+        revision: u64,
+        result: Result<Vec<usize>, String>,
+    ) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(TaskPayload::Filtered {
+                generation,
+                revision,
+                result,
+            }))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::Filter,
+            label: "Test filter",
+            generation,
+            revision,
+        });
+        app.poll_task(context);
+    }
+
+    #[test]
+    fn filter_requests_coalesce_and_old_results_cannot_replace_latest_search() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.generation = 10;
+        app.filters.name = "old".to_owned();
+        app.queue_filter();
+        let obsolete = app.filter_revision;
+        app.filters.name = "new".to_owned();
+        app.queue_filter();
+        let latest = app.filter_revision;
+        assert!(app.pending_filter);
+        assert_eq!(app.filters.name, "new");
+        finish_filter(
+            &mut app,
+            &context,
+            10,
+            obsolete,
+            Err("old invalid regex".to_owned()),
+        );
+        assert!(app.pending_filter);
+        assert!(app.filter_error.is_none());
+        finish_filter(&mut app, &context, 10, latest, Ok(vec![]));
+        assert!(!app.pending_filter);
+        assert!(app.filter_error.is_none());
+    }
+
+    #[test]
+    fn filter_errors_are_current_and_cannot_cross_a_source_change() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.generation = 4;
+        app.queue_filter();
+        let revision = app.filter_revision;
+        finish_filter(&mut app, &context, 3, revision, Err("stale".to_owned()));
+        assert!(app.filter_error.is_none());
+        assert!(app.pending_filter);
+        finish_filter(
+            &mut app,
+            &context,
+            4,
+            revision,
+            Err("current invalid regex".to_owned()),
+        );
+        assert_eq!(app.filter_error.as_deref(), Some("current invalid regex"));
+        assert!(!app.pending_filter);
+    }
+
+    #[test]
+    fn successful_operation_clears_an_old_error_banner_but_keeps_history() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.error("previous export failed");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(TaskPayload::Report {
+                operation: "Export",
+                report: OperationReport::default(),
+            }))
+            .unwrap();
+        app.task = Some(Task {
+            receiver,
+            kind: TaskKind::Export,
+            label: "Test",
+            generation: 0,
+            revision: 0,
+        });
+        app.poll_task(&context);
+        assert!(app.last_error.is_none());
+        assert!(
+            app.log
+                .iter()
+                .any(|entry| entry.text == "previous export failed")
+        );
+    }
+
+    #[test]
+    fn cab_default_base_uses_source_folder_or_common_parent() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .unwrap();
+        let source = root.join("src");
+        assert_eq!(
+            cab_base_for_inputs(&[source.join("main.rs")], None).unwrap(),
+            source
+        );
+        assert_eq!(
+            cab_base_for_inputs(std::slice::from_ref(&root), None).unwrap(),
+            root
+        );
+        assert_eq!(
+            cab_base_for_inputs(&[root.join("src/main.rs"), root.join("Cargo.toml")], None)
+                .unwrap(),
+            root
+        );
+        let explicit = PathBuf::from("explicit-relocation");
+        assert_eq!(
+            cab_base_for_inputs(&[], Some(explicit.clone())).unwrap(),
+            explicit
+        );
+        assert!(cab_base_for_inputs(&[], None).is_err());
+    }
+
+    #[test]
+    fn loaded_asset_preview_hierarchy_and_log_widgets_render_headlessly() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 7,
+        };
+        let records = vec![AssetRecord {
+            key,
+            class_id: 49,
+            class_name: "TextAsset".to_owned(),
+            name: "example".to_owned(),
+            container: "examples/readme.txt".to_owned(),
+            source: "CAB-example".to_owned(),
+            size: 16,
+        }];
+        let catalog = Catalog::prepare(&records).unwrap();
+        app.assets = catalog.assets;
+        app.by_key = catalog.by_key;
+        app.classes = catalog.classes;
+        app.visible = vec![0];
+        app.primary = Some(key);
+        app.preview = Some(DisplayPreview::Text("Example asset contents".to_owned()));
+        app.scene_loaded = true;
+        app.scene = vec![SceneNode {
+            key,
+            name: "Root object".to_owned(),
+            parent: None,
+        }];
+        app.scene_rows = vec![(0, 0)];
+        app.log(false, "A completed operation");
+        for view in 0..4 {
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| match view {
+                        0 => app.asset_table(ui),
+                        1 => app.preview_panel(ui),
+                        2 => app.hierarchy(ui),
+                        _ => app.activity_log(ui),
+                    });
+                },
+            );
+            assert!(!output.shapes.is_empty());
+        }
+    }
+
+    #[test]
     fn completed_hierarchy_clears_a_repeated_pending_request() {
         let context = egui::Context::default();
         let mut app = StudioApp::new(&context, None);
@@ -1989,12 +3150,15 @@ mod tests {
             .send(Ok(TaskPayload::Scene {
                 generation: 3,
                 nodes: vec![],
+                rows: vec![],
             }))
             .unwrap();
         app.task = Some(Task {
             receiver,
             kind: TaskKind::Scene,
             label: "Test",
+            generation: app.generation,
+            revision: app.filter_revision,
         });
         app.poll_task(&context);
         assert!(app.scene_loaded);
@@ -2008,6 +3172,8 @@ mod tests {
             receiver,
             kind: TaskKind::Scene,
             label: "Test",
+            generation: app.generation,
+            revision: app.filter_revision,
         });
         app.poll_task(&context);
         assert!(app.scene_loaded);
@@ -2017,10 +3183,10 @@ mod tests {
 
     #[test]
     fn image_validation_prevents_egui_panics_on_bad_payloads() {
-        assert!(checked_color_image(0, 1, vec![]).is_err());
-        assert!(checked_color_image(2, 2, vec![0; 15]).is_err());
-        assert!(checked_color_image(u32::MAX, u32::MAX, vec![]).is_err());
-        assert!(checked_color_image(1, 1, vec![255; 4]).is_ok());
+        assert!(checked_color_image(0, 1, &[]).is_err());
+        assert!(checked_color_image(2, 2, &[0; 15]).is_err());
+        assert!(checked_color_image(u32::MAX, u32::MAX, &[]).is_err());
+        assert!(checked_color_image(1, 1, &[255; 4]).is_ok());
     }
 
     #[test]

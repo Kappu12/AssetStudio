@@ -3,6 +3,10 @@
 //! Constructing the player and all decoder tests work without an audio device.
 
 use std::io::Cursor;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -10,12 +14,25 @@ use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 
 const MAX_PREVIEW_BYTES: usize = 128 * 1024 * 1024;
 
-#[derive(Default)]
 pub struct AudioPlayer {
     // A sink must be dropped before its output stream.
     sink: Option<Sink>,
     stream: Option<OutputStream>,
     duration: Option<Duration>,
+    volume: f32,
+    looping: Arc<AtomicBool>,
+}
+
+impl Default for AudioPlayer {
+    fn default() -> Self {
+        Self {
+            sink: None,
+            stream: None,
+            duration: None,
+            volume: 0.8,
+            looping: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl AudioPlayer {
@@ -37,7 +54,11 @@ impl AudioPlayer {
             .as_ref()
             .context("Audio output was not initialized")?;
         let sink = Sink::connect_new(stream.mixer());
-        sink.append(FiniteSamples(source));
+        sink.set_volume(self.volume);
+        sink.append(LoopingSource {
+            inner: FiniteSamples(source),
+            enabled: Arc::clone(&self.looping),
+        });
         self.sink = Some(sink);
         self.duration = duration;
         Ok(())
@@ -53,6 +74,40 @@ impl AudioPlayer {
         if let Some(sink) = &self.sink {
             sink.play();
         }
+    }
+
+    /// Preferences apply to both the current clip and future previews.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if let Some(sink) = &self.sink {
+            sink.set_volume(self.volume);
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    pub fn set_looping(&self, looping: bool) {
+        self.looping.store(looping, Ordering::Relaxed);
+    }
+
+    pub fn is_looping(&self) -> bool {
+        self.looping.load(Ordering::Relaxed)
+    }
+
+    pub fn seek(&self, position: Duration) -> Result<()> {
+        let sink = self.sink.as_ref().context("No audio clip is playing")?;
+        ensure!(!sink.empty(), "The audio clip has finished");
+        let position = self
+            .duration
+            .map_or(position, |length| position.min(length));
+        sink.try_seek(position)
+            .map_err(|error| anyhow::anyhow!("Cannot seek this audio clip: {error}"))
     }
 
     /// Stops the clip and releases the output device, including its worker.
@@ -81,13 +136,29 @@ impl AudioPlayer {
             if sink.empty() {
                 self.duration.unwrap_or_default()
             } else {
-                sink.get_pos()
+                // Rodio counts elapsed playback across streaming loop restarts.
+                // Keep the seek slider within the current pass even after the
+                // user disables looping during a later pass.
+                clip_position(sink.get_pos(), self.duration)
             }
         })
     }
 
     pub fn duration(&self) -> Option<Duration> {
         self.duration
+    }
+}
+
+fn clip_position(position: Duration, duration: Option<Duration>) -> Duration {
+    match duration {
+        Some(length) if !length.is_zero() && position > length => {
+            let nanos = position.as_nanos() % length.as_nanos();
+            Duration::new(
+                (nanos / 1_000_000_000) as u64,
+                (nanos % 1_000_000_000) as u32,
+            )
+        }
+        _ => position,
     }
 }
 
@@ -250,6 +321,60 @@ impl<S: Source> Source for FiniteSamples<S> {
     fn total_duration(&self) -> Option<Duration> {
         self.0.total_duration()
     }
+
+    fn try_seek(&mut self, position: Duration) -> Result<(), rodio::source::SeekError> {
+        self.0.try_seek(position)
+    }
+}
+
+/// Rewinds the existing seekable decoder at EOF. No decoded sample cache grows
+/// with the duration of the clip or the number of repetitions.
+struct LoopingSource<S> {
+    inner: S,
+    enabled: Arc<AtomicBool>,
+}
+
+impl<S: Source> Iterator for LoopingSource<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().or_else(|| {
+            if self.enabled.load(Ordering::Relaxed) && self.inner.try_seek(Duration::ZERO).is_ok() {
+                // Try only once: an empty or broken source must terminate.
+                self.inner.next()
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl<S: Source> Source for LoopingSource<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner
+            .current_span_len()
+            .filter(|length| *length != 0 || !self.enabled.load(Ordering::Relaxed))
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        if self.enabled.load(Ordering::Relaxed) {
+            None
+        } else {
+            self.inner.total_duration()
+        }
+    }
+
+    fn try_seek(&mut self, position: Duration) -> Result<(), rodio::source::SeekError> {
+        self.inner.try_seek(position)
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +527,64 @@ mod tests {
         assert!(!player.is_paused());
         assert_eq!(player.duration(), None);
         assert_eq!(player.position(), Duration::ZERO);
+    }
+
+    #[test]
+    fn volume_and_loop_preferences_update_without_opening_a_device() {
+        let (sink, _output) = Sink::new();
+        let mut player = AudioPlayer {
+            sink: Some(sink),
+            ..AudioPlayer::default()
+        };
+        player.set_volume(0.25);
+        assert_eq!(player.volume(), 0.25);
+        assert_eq!(player.sink.as_ref().unwrap().volume(), 0.25);
+        player.set_volume(2.0);
+        assert_eq!(player.volume(), 1.0);
+        player.set_volume(f32::NAN);
+        assert_eq!(player.volume(), 0.0);
+        player.set_looping(true);
+        assert!(player.is_looping());
+        player.stop();
+        assert!(player.is_looping());
+        assert_eq!(player.volume(), 0.0);
+        assert!(player.seek(Duration::ZERO).is_err());
+        assert!(player.stream.is_none());
+    }
+
+    #[test]
+    fn streaming_loop_and_seek_reuse_the_wav_decoder() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut source = LoopingSource {
+            inner: FiniteSamples(decode_wav(pcm_wav(1, 1_000, &[0, 16_384]), 1024).unwrap()),
+            enabled: Arc::clone(&enabled),
+        };
+        assert_eq!(source.total_duration(), None);
+        assert_eq!(source.next(), Some(0.0));
+        assert_eq!(source.next(), Some(0.5));
+        assert_eq!(source.next(), Some(0.0));
+        source.try_seek(Duration::from_millis(1)).unwrap();
+        assert_eq!(source.next(), Some(0.5));
+        enabled.store(false, Ordering::Relaxed);
+        assert_eq!(source.next(), None);
+        assert_eq!(source.total_duration(), Some(Duration::from_millis(2)));
+    }
+
+    #[test]
+    fn loop_position_stays_inside_current_pass_without_losing_precision() {
+        let clip = Some(Duration::from_nanos(7));
+        assert_eq!(
+            clip_position(Duration::from_nanos(7), clip),
+            Duration::from_nanos(7)
+        );
+        assert_eq!(
+            clip_position(Duration::from_nanos(17), clip),
+            Duration::from_nanos(3)
+        );
+        assert_eq!(
+            clip_position(Duration::MAX, Some(Duration::ZERO)),
+            Duration::MAX
+        );
+        assert_eq!(clip_position(Duration::MAX, None), Duration::MAX);
     }
 }

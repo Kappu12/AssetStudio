@@ -21,9 +21,25 @@ use unity_rs_core::{
     scene_textures::{SceneTextureLimits, SceneTextureSet},
 };
 
+/// Model conversion controls. Disabled paths are never decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelExportOptions {
+    pub include_animations: bool,
+    pub include_textures: bool,
+}
+impl Default for ModelExportOptions {
+    fn default() -> Self {
+        Self {
+            include_animations: true,
+            include_textures: true,
+        }
+    }
+}
+
 struct ModelBudget {
     used: u64,
     maximum: u64,
+    options: ModelExportOptions,
 }
 
 impl Session {
@@ -35,15 +51,32 @@ impl Session {
         format: ModelFormat,
         roots: &[AssetKey],
     ) -> Result<OperationReport> {
-        self.export_scene_with_limit(output, format, roots, MAX_EXPORT_TOTAL_BYTES)
+        self.export_scene_with_options(output, format, roots, &ModelExportOptions::default())
     }
 
-    pub(crate) fn export_scene_with_limit(
+    pub fn export_scene_with_options(
+        &self,
+        output: &Path,
+        format: ModelFormat,
+        roots: &[AssetKey],
+        options: &ModelExportOptions,
+    ) -> Result<OperationReport> {
+        self.export_scene_with_limit_and_options(
+            output,
+            format,
+            roots,
+            MAX_EXPORT_TOTAL_BYTES,
+            options,
+        )
+    }
+
+    pub(crate) fn export_scene_with_limit_and_options(
         &self,
         output: &Path,
         format: ModelFormat,
         roots: &[AssetKey],
         maximum_total: u64,
+        options: &ModelExportOptions,
     ) -> Result<OperationReport> {
         if roots.len() > 1_000_000 {
             bail!("model root count exceeds catalog limit");
@@ -56,6 +89,7 @@ impl Session {
         let mut budget = ModelBudget {
             used: 0,
             maximum: maximum_total,
+            options: *options,
         };
         if roots.is_empty() {
             let model = build_model_ir(
@@ -141,6 +175,7 @@ impl Session {
         budget: &mut ModelBudget,
         report: &mut OperationReport,
     ) -> Result<()> {
+        crate::model_preview::ensure_no_static_batches(self.studio.collection(), &model)?;
         if !model.nodes.iter().any(|node| {
             node.export_content
                 && node
@@ -168,15 +203,19 @@ impl Session {
             .maximum
             .checked_sub(budget.used)
             .context("model output budget exhausted")?;
-        let textures = SceneTextureSet::from_model(
-            self.studio.collection(),
-            &model,
-            BackendImageFormat::Png,
-            SceneTextureLimits {
-                maximum_total_encoded_bytes: remaining.min(MAX_EXPORT_FILE_BYTES),
-                ..SceneTextureLimits::default()
-            },
-        )?;
+        let textures = if budget.options.include_textures {
+            SceneTextureSet::from_model(
+                self.studio.collection(),
+                &model,
+                BackendImageFormat::Png,
+                SceneTextureLimits {
+                    maximum_total_encoded_bytes: remaining.min(MAX_EXPORT_FILE_BYTES),
+                    ..SceneTextureLimits::default()
+                },
+            )?
+        } else {
+            SceneTextureSet::default()
+        };
         let texture_bytes = textures.textures.iter().try_fold(0u64, |sum, texture| {
             sum.checked_add(texture.encoded.len() as u64)
                 .context("texture size overflow")
@@ -198,21 +237,32 @@ impl Session {
         let mut extra_names = Vec::new();
         match format {
             ModelFormat::FbxAscii | ModelFormat::FbxBinary => {
-                let graph = build_animation_graph(
-                    self.studio.collection(),
-                    &hierarchy_for_animation(self)?,
-                    AnimationGraphLimits::default(),
-                )?;
-                let animations = build_model_animations(
-                    self.studio.collection(),
-                    &model,
-                    &graph,
-                    ModelAnimationLimits {
-                        maximum_keyframes: 2_000_000,
-                        maximum_total_sample_values: 16 * 1024 * 1024,
-                        ..ModelAnimationLimits::default()
-                    },
-                )?;
+                let animations = if budget.options.include_animations {
+                    let graph = build_animation_graph(
+                        self.studio.collection(),
+                        &hierarchy_for_animation(self)?,
+                        AnimationGraphLimits::default(),
+                    )?;
+                    let mut animations = build_model_animations(
+                        self.studio.collection(),
+                        &model,
+                        &graph,
+                        ModelAnimationLimits {
+                            maximum_keyframes: 2_000_000,
+                            maximum_total_sample_values: 16 * 1024 * 1024,
+                            ..ModelAnimationLimits::default()
+                        },
+                    )?;
+                    crate::model_motion::repair_legacy_roots(
+                        self,
+                        &model,
+                        &graph,
+                        &mut animations,
+                    )?;
+                    animations
+                } else {
+                    unity_rs_core::model_animation::ModelAnimationSet::default()
+                };
                 if format == ModelFormat::FbxAscii {
                     write_model_ir_fbx_ascii_with_textures(
                         &model,

@@ -245,6 +245,203 @@ fn session_with_raw_bin(payload: Vec<u8>) -> Session {
 }
 
 #[test]
+fn multi_file_load_preserves_identity_and_can_skip_deleted_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first.assets");
+    let second = root.path().join("second.assets");
+    fs::write(&first, file(&[(49, 7, text("first", b"1"))])).unwrap();
+    fs::write(&second, file(&[(49, 7, text("second", b"2"))])).unwrap();
+    let paths = [first.clone(), second.clone(), first];
+    let session = Session::open_paths(&paths, &LoadOptions::default()).unwrap();
+    assert_eq!(session.assets().len(), 2);
+    assert_ne!(session.assets()[0].key, session.assets()[1].key);
+    assert_eq!(session.input_paths().len(), 2);
+    let missing = root.path().join("deleted.assets");
+    assert!(
+        Session::open_paths(&[second.clone(), missing.clone()], &LoadOptions::default()).is_err()
+    );
+    let options = LoadOptions {
+        continue_on_error: true,
+        ..LoadOptions::default()
+    };
+    let partial = Session::open_paths(&[second, missing], &options).unwrap();
+    assert_eq!(partial.assets().len(), 1);
+    assert_eq!(partial.diagnostics().len(), 1);
+}
+
+#[test]
+fn overwrite_cannot_replace_serialized_source_or_hardlink_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("hello_0_7.txt");
+    let original = file(&[(49, 7, text("hello", b"payload"))]);
+    fs::write(&source, &original).unwrap();
+    let session = Session::open(&source, &LoadOptions::default()).unwrap();
+    let options = ExportOptions {
+        overwrite: true,
+        group: GroupMode::None,
+        ..ExportOptions::default()
+    };
+    let report = session
+        .export(&[session.assets()[0].key], root.path(), &options)
+        .unwrap();
+    assert!(report.written.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(
+        session
+            .write_map(&[session.assets()[0].key], &source, MapFormat::Json)
+            .is_err()
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    let alias_root = tempfile::tempdir().unwrap();
+    let alias = alias_root.path().join("hello_0_7.txt");
+    fs::hard_link(&source, &alias).unwrap();
+    let report = session
+        .export(&[session.assets()[0].key], alias_root.path(), &options)
+        .unwrap();
+    assert!(report.written.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(alias).unwrap(), original);
+}
+
+fn school_encode(data: &[u8]) -> Vec<u8> {
+    let stride = data.len() % 7 + 3;
+    let mut out = data.to_vec();
+    let mut key = 0xff;
+    for (index, byte) in out.iter_mut().enumerate().skip(1) {
+        if index % stride != 0 {
+            *byte ^= key;
+        } else {
+            key = !key;
+        }
+    }
+    out
+}
+
+#[test]
+fn wrapper_extraction_never_replaces_original_encrypted_source() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("wrapper.assets");
+    let encrypted = school_encode(&file(&[(49, 7, text("hello", b"payload"))]));
+    fs::write(&source, &encrypted).unwrap();
+    let options = LoadOptions {
+        game: "SchoolGirlStrikers".into(),
+        ..LoadOptions::default()
+    };
+    let report = Session::extract(&source, root.path(), &options, true).unwrap();
+    assert!(report.written.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert!(report.failed[0].contains("original input"));
+    assert_eq!(fs::read(&source).unwrap(), encrypted);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(Session::extract(root.path(), &root.path().join("inside"), &options, true).is_err());
+    assert_eq!(fs::read(source).unwrap(), encrypted);
+}
+
+#[test]
+fn multiple_extraction_inputs_share_original_source_protection() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    let output = root.path().join("out");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::create_dir_all(output.join("input-0001")).unwrap();
+    let first = source_dir.join("victim.assets");
+    let second = output.join("input-0001/victim.assets");
+    let plain = file(&[(49, 7, text("hello", b"payload"))]);
+    let encrypted = school_encode(&plain);
+    fs::write(&first, &encrypted).unwrap();
+    fs::write(&second, &plain).unwrap();
+    let options = LoadOptions {
+        game: "SchoolGirlStrikers".into(),
+        ..LoadOptions::default()
+    };
+    let report =
+        Session::extract_paths(&[first.clone(), second.clone()], &output, &options, true).unwrap();
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.written.len(), 1);
+    assert_eq!(fs::read(first).unwrap(), encrypted);
+    assert_eq!(fs::read(second).unwrap(), plain);
+}
+
+#[test]
+fn selected_schema_and_index_inputs_cannot_be_replaced_by_exports() {
+    for schema in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("input.assets");
+        let auxiliary = root.path().join("hello_0_7.txt");
+        fs::write(&source, file(&[(49, 7, text("hello", b"payload"))])).unwrap();
+        let bytes = if schema {
+            b"{\"version\":1,\"entries\":[]}".as_slice()
+        } else {
+            b"{}".as_slice()
+        };
+        fs::write(&auxiliary, bytes).unwrap();
+        let mut session = Session::open(&source, &LoadOptions::default()).unwrap();
+        if schema {
+            session.load_schemas(&auxiliary).unwrap();
+        } else {
+            session.recover_containers(&auxiliary).unwrap();
+        }
+        let report = session
+            .export(
+                &[session.assets()[0].key],
+                root.path(),
+                &ExportOptions {
+                    group: GroupMode::None,
+                    overwrite: true,
+                    ..ExportOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(report.written.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(fs::read(auxiliary).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn successful_game_profile_load_has_advisory_without_partial_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("test.assets");
+    fs::write(&path, file(&[(49, 7, text("hello", b"payload"))])).unwrap();
+    let options = LoadOptions {
+        game: "FakeHeader".into(),
+        ..LoadOptions::default()
+    };
+    let session = Session::open(&path, &options).unwrap();
+    assert_eq!(session.assets().len(), 1);
+    assert!(session.diagnostics().is_empty());
+    assert_eq!(session.warnings().len(), 1);
+}
+
+#[test]
+fn extraction_preserves_explicit_auxiliary_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("wrapper.assets");
+    let auxiliary = root.path().join("out/input-0001/wrapper.assets");
+    fs::create_dir_all(auxiliary.parent().unwrap()).unwrap();
+    let encrypted = school_encode(&file(&[(49, 7, text("hello", b"payload"))]));
+    fs::write(&source, encrypted).unwrap();
+    fs::write(&auxiliary, b"important configuration").unwrap();
+    let options = LoadOptions {
+        game: "SchoolGirlStrikers".into(),
+        ..LoadOptions::default()
+    };
+    let report = Session::extract_paths_with_auxiliary_inputs(
+        &[source],
+        &root.path().join("out/input-0001"),
+        &options,
+        true,
+        std::slice::from_ref(&auxiliary),
+    )
+    .unwrap();
+    assert!(report.written.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(fs::read(auxiliary).unwrap(), b"important configuration");
+}
+
+#[test]
 fn malformed_headers_do_not_panic_or_produce_fake_success() {
     let seed = file(&[(49, 7, text("hello", b"world"))]);
     for length in 0..48 {

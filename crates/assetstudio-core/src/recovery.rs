@@ -43,6 +43,16 @@ pub struct AssetIndex {
 
 impl AssetIndex {
     pub fn from_path(path: &Path) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("Inspect asset index {}", path.display()))?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "Asset index must be a regular file"
+        );
+        ensure!(
+            metadata.len() <= MAX_INDEX_BYTES,
+            "Asset index exceeds 64 MiB"
+        );
         let file =
             File::open(path).with_context(|| format!("Open asset index {}", path.display()))?;
         ensure!(
@@ -251,5 +261,28 @@ mod tests {
         let index = AssetIndex::from_json(br#"{"Assets":{"1":{"Id":123}},"SubAssets":{"1":[{"Name":"recovered","PathHashLast":1}]}}"#).unwrap();
         let mut records = [record("/game/123/not-a-number.bundle::CAB-foo", "1")];
         assert_eq!(index.apply(&mut records).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_pipe_index_is_rejected_before_blocking_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.json");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = sender.send(AssetIndex::from_path(&path));
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a non-regular asset index must not block at open");
+        assert!(result.unwrap_err().to_string().contains("regular file"));
+        worker.join().unwrap();
     }
 }

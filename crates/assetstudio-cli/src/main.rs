@@ -1,19 +1,25 @@
-use std::collections::BTreeMap;
+mod schema_generator;
+
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use assetstudio_core::asset_map::{AssetMap, AssetMapFormat};
+use assetstudio_core::cab_map::CabMap;
+use assetstudio_core::unity_cn_keys::UnityCnKeys;
 use assetstudio_core::{
     AssetFilter, AssetKey, AssetRecord, ExportMode, ExportOptions, GroupMode, ImageFormat,
-    LoadOptions, MapFormat, ModelFormat, OperationReport, Session,
+    LoadOptions, ModelExportOptions, ModelFormat, OperationReport, Session,
 };
 use clap::{Parser, ValueEnum};
 use serde_json::json;
 
 const MAX_FILTER_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FILTER_PATTERNS: usize = 16_384;
+const MAX_PATH_IDS: usize = 200_000;
 
 /// Inspect and export Unity assets without a managed runtime.
 #[derive(Debug, Parser)]
@@ -46,7 +52,7 @@ struct Args {
     key: Option<u8>,
 
     /// Class names or IDs; supports legacy :Parse, :Export, and :Both suffixes.
-    #[arg(long, alias = "type", num_args = 1.., action = clap::ArgAction::Append)]
+    #[arg(long, alias = "type", num_args = 1.., allow_negative_numbers = true, action = clap::ArgAction::Append)]
     types: Vec<String>,
     /// Case-insensitive name regexes, or one UTF-8 file with a regex per line.
     #[arg(long, alias = "filter", num_args = 1.., action = clap::ArgAction::Append)]
@@ -54,6 +60,9 @@ struct Args {
     /// Case-insensitive container regexes, or one UTF-8 filter file.
     #[arg(long, num_args = 1.., action = clap::ArgAction::Append)]
     containers: Vec<String>,
+    /// Restrict selected objects to these exact signed PathIDs.
+    #[arg(long = "path-ids", alias = "path_ids", num_args = 1.., allow_negative_numbers = true)]
+    path_ids: Vec<i64>,
     /// Exclude AssetBundle objects from the selected assets.
     #[arg(long = "no_asset_bundle", alias = "no-asset-bundle")]
     no_asset_bundle: bool,
@@ -85,7 +94,7 @@ struct Args {
     #[arg(long)]
     overwrite: bool,
 
-    /// Legacy map operation. AssetMap writes a map only; None exports normally.
+    /// Map operation: None, AssetMap, CABMap, Both, or All.
     #[arg(long = "map_op", alias = "map-op", default_value = "None")]
     map_op: String,
     /// Also write an asset map during an export operation.
@@ -103,6 +112,21 @@ struct Args {
     /// Plain file name for the asset map, without a directory.
     #[arg(long = "map_name", alias = "map-name", default_value = "assets_map")]
     map_name: String,
+    /// Load an existing JSON, XML, or legacy MessagePack asset list before export.
+    #[arg(long = "asset-map", alias = "asset_map")]
+    asset_map: Option<PathBuf>,
+    /// Constrain cached asset Sources to this directory; defaults to the input directory.
+    #[arg(long = "asset-base", alias = "asset_base")]
+    asset_base: Option<PathBuf>,
+    /// Read a CAB cache and resolve all transitive input dependencies.
+    #[arg(long = "cab-map", alias = "cab_map")]
+    cab_map: Option<PathBuf>,
+    /// Base folder for CAB generation, or explicit relocation of a loaded cache.
+    #[arg(long = "cab-base", alias = "cab_base")]
+    cab_base: Option<PathBuf>,
+    /// Trusted JSON MonoBehaviour schema files; earlier files take priority.
+    #[arg(long = "mono-schema", action = clap::ArgAction::Append)]
+    mono_schemas: Vec<PathBuf>,
     /// Model format, including native Rust FBX 7.4 output.
     #[arg(
         long = "model-format",
@@ -112,6 +136,12 @@ struct Args {
     )]
     model_format: Model,
 
+    /// Export models without decoding controller or clip animations.
+    #[arg(long = "no-animations", aliases = ["ignore-controller-anim", "ignore_controller_anim"])]
+    no_animations: bool,
+    /// Omit model texture decoding and model-side image outputs.
+    #[arg(long = "no-textures")]
+    no_textures: bool,
     /// Write list, inspect, and scene output as JSON.
     #[arg(long)]
     json: bool,
@@ -125,14 +155,21 @@ struct Args {
     #[arg(long = "logger_flags", alias = "logger-flags", num_args = 1..)]
     logger_flags: Vec<String>,
 
-    /// Legacy automatic UnityCN key index; use --unity-cn-key instead.
-    #[arg(long = "key_index", hide = true)]
+    /// UnityCN key-list index; defaults to zero when UnityCN has no explicit key.
+    #[arg(
+        long = "key_index",
+        alias = "key-index",
+        conflicts_with = "unity_cn_key"
+    )]
     key_index: Option<u32>,
+    /// UnityCN key JSON file; defaults to Keys.json beside this executable.
+    #[arg(long = "keys-file", alias = "keys_file")]
+    keys_file: Option<PathBuf>,
     /// Game asset-index JSON used to recover original container names.
     #[arg(long = "ai_file", alias = "ai-file")]
     ai_file: Option<PathBuf>,
-    /// Legacy .NET assembly schema source; not executed by the Rust application.
-    #[arg(long = "dummy_dlls", hide = true)]
+    /// Read managed DLL metadata in an isolated Rust helper to recover schemas.
+    #[arg(long = "dummy_dlls", alias = "dummy-dlls")]
     dummy_dlls: Option<PathBuf>,
 }
 
@@ -181,6 +218,8 @@ enum Image {
 enum Map {
     Json,
     Xml,
+    #[value(name = "MessagePack", alias = "messagepack", alias = "map")]
+    MessagePack,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -194,10 +233,26 @@ struct Selection {
     filter: AssetFilter,
     type_flags: Vec<(String, bool)>,
     types_supplied: bool,
+    path_ids: HashSet<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapPlan {
+    Asset,
+    Cab,
+    Both,
 }
 
 struct Validated {
     operation: Operation,
+    load: LoadOptions,
+    key_source: Option<PathBuf>,
+    map_plan: MapPlan,
+    cab_input: Option<PathBuf>,
+    asset_input: Option<PathBuf>,
+    asset_format: AssetMapFormat,
+    filter_sources: Vec<PathBuf>,
+    maps_after_export: bool,
     selection: Selection,
     info_logs: bool,
     map_filename: String,
@@ -215,7 +270,24 @@ impl From<anyhow::Error> for Failure {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse_from(std::env::args_os().map(|argument| {
+    let raw_arguments: Vec<_> = std::env::args_os().collect();
+    if raw_arguments
+        .get(1)
+        .is_some_and(|value| value == "--internal-schema-generator")
+    {
+        if raw_arguments.len() != 3 {
+            eprintln!("AssetStudioCLI: internal schema generation requires one request file");
+            return ExitCode::from(2);
+        }
+        return match schema_generator::run_child(Path::new(&raw_arguments[2])) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("AssetStudioCLI: {error:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    let args = Args::parse_from(raw_arguments.into_iter().map(|argument| {
         if argument == "-?" {
             "--help".into()
         } else {
@@ -262,7 +334,11 @@ fn is_broken_pipe(error: &anyhow::Error) -> bool {
 fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Failure> {
     // Validate every option before opening or creating anything.
     let validated = validate(args).map_err(|error| Failure::Usage(format!("{error:#}")))?;
-    let load = load_options(args);
+    let load = validated.load.clone();
+    let model_options = ModelExportOptions {
+        include_animations: !args.no_animations,
+        include_textures: !args.no_textures,
+    };
     let export = ExportOptions {
         mode: match args.export_type {
             Mode::Convert => ExportMode::Convert,
@@ -285,31 +361,145 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
         overwrite: args.overwrite,
     };
     if validated.operation == Operation::Extract {
-        let report = Session::extract(
-            &args.input_path,
+        let auxiliary: Vec<PathBuf> = validated.key_source.iter().cloned().collect();
+        let report = Session::extract_paths_with_auxiliary_inputs(
+            std::slice::from_ref(&args.input_path),
             output_directory(args)?,
             &load,
             args.overwrite,
+            &auxiliary,
         )?;
         return Ok(print_report(&report, validated.info_logs));
     }
 
-    let mut session = Session::open(&args.input_path, &load)?;
+    let asset_cache = validated
+        .asset_input
+        .as_deref()
+        .map(|path| AssetMap::from_path(path, validated.asset_format))
+        .transpose()?;
+    let mut asset_base = None;
+    let mut asset_indexes = Vec::new();
+    let mut input_paths = vec![args.input_path.clone()];
+    if let Some(map) = &asset_cache {
+        if let Some(game) = map.game_type() {
+            let expected = assetstudio_core::asset_map::game_name(game)
+                .context("asset map references an unknown game profile")?;
+            if !args.game.eq_ignore_ascii_case(expected) {
+                return Err(Failure::Runtime(anyhow::anyhow!(
+                    "asset map requires --game {expected}; the selected game differs"
+                )));
+            }
+        }
+        asset_indexes = map
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                selected(&entry.record(), args, &validated.selection).then_some(index)
+            })
+            .collect();
+        if asset_indexes.is_empty() {
+            return empty_cached_selection(args, &validated, output);
+        }
+        let base = if let Some(base) = &args.asset_base {
+            base.clone()
+        } else {
+            let input =
+                std::fs::canonicalize(&args.input_path).context("resolve asset map input base")?;
+            if input.is_dir() {
+                input
+            } else {
+                input
+                    .parent()
+                    .context("asset map input has no parent directory")?
+                    .to_owned()
+            }
+        };
+        input_paths = map.resolve_sources(&asset_indexes, &base)?;
+        asset_base = Some(base);
+    }
+    let cache = validated
+        .cab_input
+        .as_deref()
+        .map(CabMap::from_path)
+        .transpose()?;
+    if let Some(map) = &cache {
+        input_paths = map.resolve_paths(&input_paths, args.cab_base.as_deref())?;
+        if validated.info_logs {
+            eprintln!(
+                "Resolved {} input path(s) through the CAB cache",
+                input_paths.len()
+            );
+        }
+    }
+    let mut session = Session::open_paths(&input_paths, &load)?;
+    if let Some(path) = &validated.asset_input {
+        session.protect_input_path(path)?;
+    }
+    if let Some(path) = &validated.key_source {
+        session.protect_input_path(path)?;
+    }
+    if let Some(path) = &validated.cab_input {
+        session.protect_input_path(path)?;
+    }
+    for path in &validated.filter_sources {
+        session.protect_input_path(path)?;
+    }
+    for schema in &args.mono_schemas {
+        let loaded = session.load_schemas(schema)?;
+        if validated.info_logs {
+            eprintln!(
+                "Loaded {loaded} MonoBehaviour schema(s) from {}",
+                schema.display()
+            );
+        }
+    }
+    if let Some(folder) = &args.dummy_dlls {
+        let loaded = session.load_dummy_dlls(
+            folder,
+            &std::env::current_exe().context("locate schema helper executable")?,
+        )?;
+        if validated.info_logs {
+            eprintln!("Recovered {loaded} MonoBehaviour schema(s) from DLL metadata");
+        }
+    }
     if let Some(index_path) = &args.ai_file {
         let recovered = session.recover_containers(index_path)?;
         if validated.info_logs {
             eprintln!("Recovered container names for {recovered} asset(s)");
         }
     }
+    for warning in session.warnings() {
+        eprintln!("warning: {warning}");
+    }
     let diagnostics = session.diagnostics();
     for diagnostic in diagnostics {
         eprintln!("warning: {diagnostic}");
     }
     let partial_load = !diagnostics.is_empty();
+    let cached_keys = if let Some(map) = &asset_cache {
+        Some(
+            map.keys_in_session(
+                &asset_indexes,
+                &session,
+                asset_base.as_deref().context("asset map base is missing")?,
+            )?
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        )
+    } else {
+        None
+    };
     let assets: Vec<&AssetRecord> = session
         .assets()
         .iter()
-        .filter(|asset| selected(asset, args, &validated.selection))
+        .filter(|asset| {
+            if let Some(keys) = &cached_keys {
+                keys.contains(&asset.key)
+            } else {
+                selected(asset, args, &validated.selection)
+            }
+        })
         .collect();
     let keys: Vec<AssetKey> = assets.iter().map(|asset| asset.key).collect();
 
@@ -373,35 +563,44 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
             if validated.info_logs {
                 eprintln!("Selected {} asset(s)", keys.len());
             }
-            let report = session.export(&keys, output_directory(args)?, &export)?;
+            let report = session.export_with_model_options(
+                &keys,
+                output_directory(args)?,
+                &export,
+                &model_options,
+            )?;
             code = print_report(&report, validated.info_logs);
-            if args.write_map {
-                let path = output_directory(args)?.join(&validated.map_filename);
-                let report = session.write_map(&keys, &path, map_format(args.map_type))?;
-                code = code.max(print_report(&report, validated.info_logs));
+            if args.write_map || validated.maps_after_export {
+                code = code.max(write_requested_maps(
+                    &session,
+                    &keys,
+                    args,
+                    &validated,
+                    cache.as_ref(),
+                )?);
             }
         }
         Operation::Map => {
-            let path = output_directory(args)?.join(&validated.map_filename);
-            let report = session.write_map(&keys, &path, map_format(args.map_type))?;
-            code = print_report(&report, validated.info_logs);
+            code = write_requested_maps(&session, &keys, args, &validated, cache.as_ref())?;
         }
         Operation::Model => {
             let filtered = !args.types.is_empty()
                 || !args.names.is_empty()
                 || !args.containers.is_empty()
+                || !validated.selection.path_ids.is_empty()
                 || args.no_asset_bundle
-                || args.no_index_object;
+                || args.no_index_object
+                || validated.asset_input.is_some();
             // Empty roots mean the whole scene in Core. Never turn an empty
             // filtered selection into an accidental whole-scene export.
             let roots: Vec<_> = assets
                 .iter()
-                .filter(|asset| asset.class_id == 1)
+                .filter(|asset| matches!(asset.class_id, 1 | 95))
                 .map(|asset| asset.key)
                 .collect();
             if filtered && roots.is_empty() {
                 return Err(Failure::Runtime(anyhow::anyhow!(
-                    "no GameObject roots matched the model filters"
+                    "no GameObject or Animator roots matched the model filters"
                 )));
             }
             let format = match args.model_format {
@@ -409,10 +608,11 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
                 Model::FbxBinary => ModelFormat::FbxBinary,
                 Model::Obj => ModelFormat::Obj,
             };
-            let report = session.export_scene(
+            let report = session.export_scene_with_options(
                 output_directory(args)?,
                 format,
                 if filtered { &roots } else { &[] },
+                &model_options,
             )?;
             code = print_report(&report, validated.info_logs);
         }
@@ -424,27 +624,61 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
 }
 
 fn validate(args: &Args) -> Result<Validated> {
-    if args.key_index.is_some() {
-        anyhow::bail!("--key_index is not implemented; supply the explicit --unity-cn-key instead");
-    }
-    if args.dummy_dlls.is_some() {
-        anyhow::bail!(
-            "--dummy_dlls is not implemented: Rust does not load managed assemblies; embedded TypeTrees can still be exported as JSON"
-        );
-    }
-    let operation = if args.map_op.eq_ignore_ascii_case("none") {
-        args.operation
-    } else if args.map_op.eq_ignore_ascii_case("assetmap") {
-        if !matches!(args.operation, Operation::Export | Operation::Map) {
-            anyhow::bail!("--map_op AssetMap conflicts with the selected --operation");
+    let compact_map_op = args
+        .map_op
+        .split([',', '|', '+'])
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let mut cab_input = args.cab_map.clone();
+    let mut asset_input = args.asset_map.clone();
+    let mut asset_format = AssetMapFormat::Auto;
+    let mut map_name_is_input = false;
+    let (operation, map_plan, maps_after_export) = match compact_map_op.as_slice() {
+        [name] if name == "none" => (args.operation, MapPlan::Asset, false),
+        [name] if name == "assetmap" => (Operation::Map, MapPlan::Asset, false),
+        [name] if name == "cabmap" => (Operation::Map, MapPlan::Cab, false),
+        [name] if name == "both" => (Operation::Map, MapPlan::Both, false),
+        [name] if name == "all" => (Operation::Export, MapPlan::Both, true),
+        values
+            if values.len() == 2
+                && values.iter().any(|value| value == "cabmap")
+                && values.iter().any(|value| value == "load") =>
+        {
+            if cab_input.is_none() {
+                cab_input = Some(Path::new("Maps").join(cab_map_filename(&args.map_name)?));
+            }
+            (args.operation, MapPlan::Asset, false)
         }
-        Operation::Map
-    } else {
-        anyhow::bail!(
-            "--map_op {:?} is not implemented; use AssetMap for an asset list, or --write-map to combine a map with export. Legacy CABMap/cache loading is pending",
+        values
+            if values.len() == 2
+                && values.iter().any(|value| value == "assetmap")
+                && values.iter().any(|value| value == "load") =>
+        {
+            if asset_input.is_none() {
+                asset_input = Some(PathBuf::from(&args.map_name));
+                map_name_is_input = true;
+            }
+            asset_format = map_format(args.map_type);
+            (args.operation, MapPlan::Asset, false)
+        }
+        [name] if name == "load" && cab_input.is_some() => (args.operation, MapPlan::Asset, false),
+        _ => anyhow::bail!(
+            "invalid --map_op {:?}; use None, AssetMap, CABMap, Both, All, or CABMap,Load. AssetMap,Load selects cached asset identities; --cab-map resolves dependency caches",
             args.map_op
-        );
+        ),
     };
+    if operation != args.operation && args.operation != Operation::Export {
+        anyhow::bail!("--map_op conflicts with the selected --operation");
+    }
+    if (args.no_animations || args.no_textures)
+        && !matches!(operation, Operation::Export | Operation::Model)
+    {
+        anyhow::bail!("--no-animations and --no-textures apply to asset or model export");
+    }
+    if args.mono_schemas.len() > 64 {
+        anyhow::bail!("at most 64 --mono-schema files may be supplied");
+    }
     if matches!(
         operation,
         Operation::Export | Operation::Extract | Operation::Model | Operation::Map
@@ -470,6 +704,13 @@ fn validate(args: &Args) -> Result<Validated> {
             || !args.names.is_empty()
             || !args.containers.is_empty()
             || args.ai_file.is_some()
+            || cab_input.is_some()
+            || args.cab_base.is_some()
+            || !args.mono_schemas.is_empty()
+            || args.dummy_dlls.is_some()
+            || !args.path_ids.is_empty()
+            || asset_input.is_some()
+            || args.asset_base.is_some()
             || args.no_asset_bundle
             || args.no_index_object)
     {
@@ -479,6 +720,8 @@ fn validate(args: &Args) -> Result<Validated> {
         && (!args.types.is_empty()
             || !args.names.is_empty()
             || !args.containers.is_empty()
+            || !args.path_ids.is_empty()
+            || asset_input.is_some()
             || args.no_asset_bundle
             || args.no_index_object)
     {
@@ -489,10 +732,28 @@ fn validate(args: &Args) -> Result<Validated> {
     if args.game.trim().is_empty() {
         anyhow::bail!("--game cannot be empty");
     }
-    load_options(args).validate()?;
-    if args.overwrite && matches!(operation, Operation::Model | Operation::Map) {
+    let (load, key_source) = load_options(args)?;
+    load.validate()?;
+    if args.overwrite
+        && (operation == Operation::Model
+            || (operation == Operation::Map && map_plan != MapPlan::Cab))
+    {
         anyhow::bail!(
-            "--overwrite is implemented for asset export and extraction; model and map exports preserve existing files"
+            "--overwrite is implemented for asset export, extraction, and CAB caches; model and asset-map exports preserve existing files"
+        );
+    }
+    if args.cab_base.is_some()
+        && cab_input.is_none()
+        && !matches!(map_plan, MapPlan::Cab | MapPlan::Both)
+    {
+        anyhow::bail!("--cab-base requires CAB cache loading or generation");
+    }
+    if args.asset_base.is_some() && asset_input.is_none() {
+        anyhow::bail!("--asset-base requires an asset map input");
+    }
+    if map_name_is_input && (args.write_map || operation == Operation::Map || maps_after_export) {
+        anyhow::bail!(
+            "use --asset-map to load a cache when --map_name is needed for output naming"
         );
     }
     let mut info_logs = !args.silent;
@@ -511,8 +772,13 @@ fn validate(args: &Args) -> Result<Validated> {
                 .any(|name| flag.eq_ignore_ascii_case(name))
         });
     }
-    let names = read_patterns(&args.names)?;
-    let containers = read_patterns(&args.containers)?;
+    let (names, name_source) = read_patterns(&args.names)?;
+    let (containers, container_source) = read_patterns(&args.containers)?;
+    let filter_sources = name_source.into_iter().chain(container_source).collect();
+    if args.path_ids.len() > MAX_PATH_IDS {
+        anyhow::bail!("at most {MAX_PATH_IDS} PathIDs may be supplied");
+    }
+    let path_ids = args.path_ids.iter().copied().collect();
     let mut type_flags = Vec::new();
     for value in &args.types {
         let (name, setting) = value.split_once(':').unwrap_or((value, "Both"));
@@ -532,13 +798,29 @@ fn validate(args: &Args) -> Result<Validated> {
     }
     let all_classes: Vec<_> = type_flags.iter().map(|(name, _)| name.clone()).collect();
     let filter = AssetFilter::new(&all_classes, &names, &containers)?;
-    let map_filename = map_filename(&args.map_name, args.map_type)?;
+    let map_filename = map_filename(
+        if map_name_is_input {
+            "assets_map"
+        } else {
+            &args.map_name
+        },
+        args.map_type,
+    )?;
     Ok(Validated {
         operation,
+        load,
+        key_source,
+        map_plan,
+        cab_input,
+        asset_input,
+        asset_format,
+        filter_sources,
+        maps_after_export,
         selection: Selection {
             filter,
             type_flags,
             types_supplied: !args.types.is_empty(),
+            path_ids,
         },
         info_logs,
         map_filename,
@@ -546,6 +828,9 @@ fn validate(args: &Args) -> Result<Validated> {
 }
 
 fn selected(asset: &AssetRecord, args: &Args, selection: &Selection) -> bool {
+    if !selection.path_ids.is_empty() && !selection.path_ids.contains(&asset.key.path_id) {
+        return false;
+    }
     if !selection.filter.matches(asset) {
         return false;
     }
@@ -556,7 +841,7 @@ fn selected(asset: &AssetRecord, args: &Args, selection: &Selection) -> bool {
             .rev()
             .find(|(class, _)| {
                 class.eq_ignore_ascii_case(&asset.class_name)
-                    || class.parse::<i32>().ok() == Some(asset.class_id)
+                    || assetstudio_core::class_id(class) == Some(asset.class_id)
             })
             .is_some_and(|(_, export)| *export)
     {
@@ -574,13 +859,89 @@ fn selected(asset: &AssetRecord, args: &Args, selection: &Selection) -> bool {
     true
 }
 
-fn load_options(args: &Args) -> LoadOptions {
-    LoadOptions {
-        game: args.game.clone(),
-        unity_version: args.unity_version.clone(),
-        unity_cn_key: args.unity_cn_key.clone(),
-        xor_key: args.key.unwrap_or(0),
-        continue_on_error: args.continue_on_error,
+fn load_options(args: &Args) -> Result<(LoadOptions, Option<PathBuf>)> {
+    let mut unity_cn_key = args.unity_cn_key.clone();
+    let mut key_source = None;
+    let selected_index = args.key_index.is_some() || args.keys_file.is_some();
+    if selected_index && !args.game.eq_ignore_ascii_case("UnityCN") {
+        anyhow::bail!("--key_index and --keys-file require --game UnityCN");
+    }
+    if args.unity_cn_key.is_some() && (args.keys_file.is_some() || args.key_index.is_some()) {
+        anyhow::bail!("choose an explicit --unity-cn-key or a key-list index, not both");
+    }
+    if args.game.eq_ignore_ascii_case("UnityCN") && unity_cn_key.is_none() {
+        let path = if let Some(path) = &args.keys_file {
+            path.clone()
+        } else {
+            UnityCnKeys::beside_executable(
+                &std::env::current_exe().context("locate default UnityCN key list")?,
+            )?
+        };
+        let keys = UnityCnKeys::from_path(&path)?;
+        let index = usize::try_from(args.key_index.unwrap_or(0))?;
+        unity_cn_key = Some(keys.key(index)?.to_owned());
+        key_source = Some(path);
+    }
+    Ok((
+        LoadOptions {
+            game: args.game.clone(),
+            unity_version: args.unity_version.clone(),
+            unity_cn_key,
+            xor_key: args.key.unwrap_or(0),
+            continue_on_error: args.continue_on_error,
+        },
+        key_source,
+    ))
+}
+
+fn write_requested_maps(
+    session: &Session,
+    keys: &[AssetKey],
+    args: &Args,
+    validated: &Validated,
+    loaded_cache: Option<&CabMap>,
+) -> Result<u8> {
+    let mut code = 0;
+    if matches!(validated.map_plan, MapPlan::Asset | MapPlan::Both) {
+        let path = output_directory(args)?.join(&validated.map_filename);
+        code = print_report(
+            &session.write_asset_cache(keys, &path, map_format(args.map_type), &args.game)?,
+            validated.info_logs,
+        );
+    }
+    if matches!(validated.map_plan, MapPlan::Cab | MapPlan::Both) {
+        let base = if let Some(base) = &args.cab_base {
+            base.clone()
+        } else if let Some(cache) = loaded_cache {
+            cache.resolved_base(None)?
+        } else {
+            let input =
+                std::fs::canonicalize(&args.input_path).context("resolve CAB input base")?;
+            if input.is_dir() {
+                input
+            } else {
+                input
+                    .parent()
+                    .context("CAB input has no base directory")?
+                    .to_owned()
+            }
+        };
+        let path = output_directory(args)?.join(cab_map_filename(&args.map_name)?);
+        code = code.max(print_report(
+            &session.write_cab_map(&base, &path, args.overwrite)?,
+            validated.info_logs,
+        ));
+    }
+    Ok(code)
+}
+
+fn cab_map_filename(name: &str) -> Result<String> {
+    // Reuse the same traversal and portable-name checks as asset maps.
+    map_filename(name, Map::Json)?;
+    if name.to_ascii_lowercase().ends_with(".bin") {
+        Ok(name.to_owned())
+    } else {
+        Ok(format!("{name}.bin"))
     }
 }
 
@@ -602,7 +963,10 @@ fn parse_byte(value: &str) -> std::result::Result<u8, String> {
     parsed.map_err(|_| "expected a byte in 0..255 or 0x00..0xFF".to_owned())
 }
 
-fn read_patterns(values: &[String]) -> Result<Vec<String>> {
+fn read_patterns(values: &[String]) -> Result<(Vec<String>, Option<PathBuf>)> {
+    if values.len() > MAX_FILTER_PATTERNS {
+        anyhow::bail!("too many filter patterns");
+    }
     if values.len() == 1 {
         let path = Path::new(&values[0]);
         if path.is_file() {
@@ -631,13 +995,13 @@ fn read_patterns(values: &[String]) -> Result<Vec<String>> {
             if patterns.is_empty() {
                 anyhow::bail!("filter file contains no patterns");
             }
-            return Ok(patterns);
+            return Ok((patterns, Some(std::fs::canonicalize(path)?)));
         }
     }
     if values.iter().any(|value| value.trim().is_empty()) {
         anyhow::bail!("an empty regex is invalid; omit the filter to select all assets");
     }
-    Ok(values.to_vec())
+    Ok((values.to_vec(), None))
 }
 
 fn map_filename(name: &str, format: Map) -> Result<String> {
@@ -653,18 +1017,30 @@ fn map_filename(name: &str, format: Map) -> Result<String> {
     {
         anyhow::bail!("--map_name must be a plain portable filename, without directories");
     }
-    let base = name.split('.').next().unwrap_or(name).to_uppercase();
-    if [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ]
-    .contains(&base.as_str())
-    {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let serial = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) || serial.is_some_and(|number| {
+        matches!(
+            number,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    }) {
         anyhow::bail!("--map_name is a reserved device name");
     }
     let extension = match format {
         Map::Json => "json",
         Map::Xml => "xml",
+        Map::MessagePack => "map",
     };
     let suffix = format!(".{extension}");
     if name.to_lowercase().ends_with(&suffix) {
@@ -674,11 +1050,40 @@ fn map_filename(name: &str, format: Map) -> Result<String> {
     }
 }
 
-fn map_format(value: Map) -> MapFormat {
+fn map_format(value: Map) -> AssetMapFormat {
     match value {
-        Map::Json => MapFormat::Json,
-        Map::Xml => MapFormat::Xml,
+        Map::Json => AssetMapFormat::Json,
+        Map::Xml => AssetMapFormat::Xml,
+        Map::MessagePack => AssetMapFormat::MessagePack,
     }
+}
+
+fn empty_cached_selection(
+    args: &Args,
+    validated: &Validated,
+    output: &mut impl Write,
+) -> std::result::Result<u8, Failure> {
+    match validated.operation {
+        Operation::Model => {
+            return Err(Failure::Runtime(anyhow::anyhow!(
+                "no GameObject or Animator roots matched the model filters"
+            )));
+        }
+        Operation::List => write_listing(&[], args.json, output)?,
+        Operation::Inspect if args.json => write_json(
+            output,
+            &json!({"input":args.input_path.to_string_lossy(),"assets":0,"classes":{},"diagnostics":[]}),
+        )?,
+        Operation::Inspect => {
+            writeln!(output, "Selected assets: 0").context("write empty asset-map summary")?;
+        }
+        _ => {
+            if validated.info_logs {
+                eprintln!("No cached assets matched; no input files were loaded");
+            }
+        }
+    }
+    Ok(0)
 }
 
 fn print_report(report: &OperationReport, info_logs: bool) -> u8 {
@@ -804,7 +1209,20 @@ mod tests {
     #[test]
     fn portable_map_names_cannot_escape_output_or_address_windows_devices() {
         for name in [
-            "../map", "..\\map", "C:map", "map\n", "NUL", "CON.json", "map.", "map ",
+            "../map",
+            "..\\map",
+            "C:map",
+            "map\n",
+            "NUL",
+            "CON.json",
+            "map.",
+            "map ",
+            "CON .txt",
+            "LPT1 .bin",
+            "COM¹",
+            "LPT²",
+            "CONIN$",
+            "CONOUT$",
         ] {
             assert!(map_filename(name, Map::Json).is_err(), "accepted {name:?}");
         }

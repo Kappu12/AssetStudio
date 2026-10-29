@@ -26,11 +26,24 @@ pub(crate) fn component(name: &str) -> String {
     if result.is_empty() {
         result.push('_');
     }
-    let stem = result.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let stem = result
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let serial = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) || serial.is_some_and(|number| {
+        matches!(
+            number,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    });
     if reserved {
         result.insert(0, '_');
     }
@@ -185,6 +198,10 @@ mod tests {
             assert!(!sanitized.contains(['/', '\\', ':']));
         }
         assert_eq!(component("CON.txt"), "_CON.txt");
+        assert_eq!(component("CON .txt"), "_CON .txt");
+        assert_eq!(component("LPT1 .bin"), "_LPT1 .bin");
+        assert_eq!(component("COM¹.foo"), "_COM¹.foo");
+        assert_eq!(component("LPT²"), "_LPT²");
     }
     #[test]
     fn atomic_no_clobber_and_failure_cleanup() {

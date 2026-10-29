@@ -106,6 +106,15 @@ class Fixture(unittest.TestCase):
 
 class PackageTests(Fixture):
     def test_package_contains_binaries_notices_and_verified_manifest(self) -> None:
+        linked_documents = {
+            "docs/feature-parity.md": "See [review sweeps](review-sweeps.md).\n",
+            "docs/review-sweeps.md": "Review evidence.\n",
+            "crates/assetstudio-cli/README.md": "CLI usage.\n",
+        }
+        for name, contents in linked_documents.items():
+            document = self.root / name
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(contents, encoding="utf-8")
         archive, checksum = self.package()
         inspect_zip(archive, self.version)
         self.assertEqual(checksum.read_text(), f"{sha256(archive)}  {archive.name}\n")
@@ -114,6 +123,8 @@ class PackageTests(Fixture):
             self.assertTrue(set(BINARIES + DOCUMENTS).issubset(names))
             self.assertEqual(package.read("Keys.json"), b"[]\n")
             self.assertEqual(package.read("licenses/managed-schema-templates/LICENSE"), b"Fixture vendored source MIT notice\n")
+            for name, contents in linked_documents.items():
+                self.assertEqual(package.read(name), contents.encode("utf-8"))
             inventory = json.loads(package.read("dependency-inventory.json"))
             self.assertEqual([p["name"] for p in inventory], ["fixture-codec", "unity-rs-core"])
             self.assertEqual(package.read(inventory[0]["license_files"][0]), b"Fixture codec MIT notice\n")

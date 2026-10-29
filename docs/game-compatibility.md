@@ -20,8 +20,10 @@ pinned format backend and the actual input.
 - No real game corpus was supplied for this rewrite. Every named proprietary
   game's current real-world compatibility is **Not tested**.
 
-All accepted wrapper profiles produce a visible load diagnostic explaining
-that real-game compatibility is not verified. Input files are never modified.
+All accepted wrapper profiles expose a visible advisory through
+`Session::warnings()` explaining that real-game compatibility is not verified.
+These advisories do not count as load failures or change a successful CLI exit
+status. Input files are never modified.
 
 | Legacy profile | Rust path | Remaining evidence or implementation |
 | --- | --- | --- |

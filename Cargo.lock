@@ -235,21 +235,26 @@ dependencies = [
  "anyhow",
  "assetstudio-core",
  "clap",
+ "clrmeta",
  "serde",
  "serde_json",
  "tempfile",
+ "unity-rs-core",
 ]
 
 [[package]]
 name = "assetstudio-core"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "ab_glyph",
  "aes",
  "anyhow",
  "lz4_flex",
  "lzma-rust2",
  "md-5",
+ "quick-xml",
  "regex",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
@@ -266,6 +271,9 @@ dependencies = [
  "regex",
  "rfd",
  "rodio",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -579,6 +587,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a"
 dependencies = [
  "error-code",
+]
+
+[[package]]
+name = "clrmeta"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55b79baced645960d480f3ee57ebc38dc7d5100d061359e384b672edca2de5cf"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]

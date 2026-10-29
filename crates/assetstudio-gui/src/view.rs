@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use assetstudio_core::{AssetFilter, AssetKey, AssetRecord};
 
@@ -13,12 +14,61 @@ pub enum SortColumn {
     PathId,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Filters {
     pub name: String,
     pub container: String,
     pub class: Option<String>,
     pub regex: bool,
+}
+
+pub struct Catalog {
+    pub assets: Arc<Vec<AssetRecord>>,
+    pub classes: BTreeMap<String, usize>,
+    pub by_key: HashMap<AssetKey, usize>,
+}
+
+impl Catalog {
+    /// Materialized by the load worker, including all copying and indexes.
+    pub fn prepare(records: &[AssetRecord]) -> Result<Self, String> {
+        let mut assets = Vec::new();
+        assets
+            .try_reserve_exact(records.len())
+            .map_err(|error| error.to_string())?;
+        let mut by_key = HashMap::new();
+        by_key
+            .try_reserve(records.len())
+            .map_err(|error| error.to_string())?;
+        let mut classes = BTreeMap::new();
+        let copy = |value: &str| -> Result<String, String> {
+            let mut output = String::new();
+            output
+                .try_reserve_exact(value.len())
+                .map_err(|error| error.to_string())?;
+            output.push_str(value);
+            Ok(output)
+        };
+        for record in records {
+            if by_key.insert(record.key, assets.len()).is_some() {
+                return Err("The asset catalog contains duplicate object identities.".to_owned());
+            }
+            *classes.entry(copy(&record.class_name)?).or_default() += 1;
+            assets.push(AssetRecord {
+                key: record.key,
+                class_id: record.class_id,
+                class_name: copy(&record.class_name)?,
+                name: copy(&record.name)?,
+                container: copy(&record.container)?,
+                source: copy(&record.source)?,
+                size: record.size,
+            });
+        }
+        Ok(Self {
+            assets: Arc::new(assets),
+            classes,
+            by_key,
+        })
+    }
 }
 
 pub fn visible_rows(
@@ -134,6 +184,15 @@ pub struct MeshPreview {
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
+    pub pan: [f32; 2],
+    pub mode: MeshMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MeshMode {
+    Shaded,
+    Wireframe,
+    Combined,
 }
 
 impl MeshPreview {
@@ -205,6 +264,8 @@ impl MeshPreview {
             yaw: -0.5,
             pitch: 0.25,
             zoom: 1.0,
+            pan: [0.0; 2],
+            mode: MeshMode::Shaded,
         })
     }
 
@@ -216,33 +277,82 @@ impl MeshPreview {
         self.triangles.len() < self.original_triangles
     }
 
-    pub fn lines(&self, rect: eframe::egui::Rect) -> Vec<[eframe::egui::Pos2; 2]> {
-        let (sine_yaw, cosine_yaw) = self.yaw.sin_cos();
-        let (sine_pitch, cosine_pitch) = self.pitch.sin_cos();
-        let scale = rect.width().min(rect.height()) * 0.32 * self.zoom;
-        let projected: Vec<_> = self
-            .vertices
-            .iter()
-            .map(|vertex| {
-                let x = vertex[0] * cosine_yaw + vertex[2] * sine_yaw;
-                let z = -vertex[0] * sine_yaw + vertex[2] * cosine_yaw;
-                let y = vertex[1] * cosine_pitch - z * sine_pitch;
-                rect.center() + eframe::egui::vec2(x * scale, -y * scale)
-            })
-            .collect();
-        let mut lines = Vec::with_capacity(self.triangles.len() * 3);
-        for triangle in &self.triangles {
-            lines.push([projected[triangle[0]], projected[triangle[1]]]);
-            lines.push([projected[triangle[1]], projected[triangle[2]]]);
-            lines.push([projected[triangle[2]], projected[triangle[0]]]);
-        }
-        lines
+    pub fn faces(
+        &self,
+        rect: eframe::egui::Rect,
+    ) -> Result<Vec<crate::preview_geometry::ProjectedFace>, String> {
+        crate::preview_geometry::project_faces(
+            &self.vertices,
+            &self.triangles,
+            rect,
+            crate::preview_geometry::MeshCamera {
+                yaw: self.yaw,
+                pitch: self.pitch,
+                zoom: self.zoom,
+                pan: self.pan,
+            },
+        )
+    }
+
+    pub fn reset_camera(&mut self) {
+        self.yaw = -0.5;
+        self.pitch = 0.25;
+        self.zoom = 1.0;
+        self.pan = [0.0; 2];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(id: i64, name: &str, class: &str) -> AssetRecord {
+        AssetRecord {
+            key: key(id),
+            class_id: 49,
+            class_name: class.to_owned(),
+            name: name.to_owned(),
+            container: "folder/file.txt".to_owned(),
+            source: "CAB-file".to_owned(),
+            size: 16,
+        }
+    }
+
+    #[test]
+    fn catalog_preparation_owns_metadata_and_builds_correct_indexes() {
+        let mut source = vec![
+            record(2, "second", "TextAsset"),
+            record(1, "first", "TextAsset"),
+        ];
+        let catalog = Catalog::prepare(&source).unwrap();
+        assert_eq!(catalog.by_key[&key(1)], 1);
+        assert_eq!(catalog.classes["TextAsset"], 2);
+        source[0].name = "changed after preparation".to_owned();
+        assert_eq!(catalog.assets[0].name, "second");
+        assert!(Catalog::prepare(&[source[0].clone(), source[0].clone()]).is_err());
+    }
+
+    #[test]
+    fn filtering_treats_plain_queries_literally_and_reports_invalid_regex() {
+        let assets = [
+            record(2, "other", "TextAsset"),
+            record(1, "a[1]", "TextAsset"),
+        ];
+        let filters = Filters {
+            name: "[1]".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            visible_rows(&assets, &filters, SortColumn::Name, false).unwrap(),
+            vec![1]
+        );
+        let filters = Filters {
+            name: "[".to_owned(),
+            regex: true,
+            ..Default::default()
+        };
+        assert!(visible_rows(&assets, &filters, SortColumn::Name, false).is_err());
+    }
 
     fn key(id: i64) -> AssetKey {
         AssetKey {
@@ -335,15 +445,17 @@ mod tests {
             vec![0, 1, 2],
         )
         .unwrap();
-        let lines = mesh.lines(eframe::egui::Rect::from_min_size(
-            eframe::egui::Pos2::ZERO,
-            eframe::egui::vec2(400.0, 300.0),
-        ));
-        assert_eq!(lines.len(), 3);
+        let faces = mesh
+            .faces(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(400.0, 300.0),
+            ))
+            .unwrap();
+        assert_eq!(faces.len(), 1);
         assert!(
-            lines
+            faces
                 .iter()
-                .flatten()
+                .flat_map(|face| face.points)
                 .all(|point| point.x.is_finite() && point.y.is_finite())
         );
     }

@@ -17,7 +17,10 @@ impl AssetFilter {
             bail!("class filters must not be empty");
         }
         Ok(Self {
-            classes: classes.to_vec(),
+            classes: classes
+                .iter()
+                .map(|name| crate::class_id(name).map_or_else(|| name.clone(), |id| id.to_string()))
+                .collect(),
             names: compile(names)?,
             containers: compile(containers)?,
         })
@@ -93,5 +96,22 @@ mod tests {
         assert!(AssetFilter::new(&[], &["[".into()], &[]).is_err());
         assert!(AssetFilter::new(&[], &[" ".into()], &[]).is_err());
         assert!(AssetFilter::new(&[], &[], &["".into()]).is_err());
+    }
+
+    #[test]
+    fn original_class_alias_is_accepted() {
+        let mut asset = record();
+        asset.class_id = 126;
+        asset.class_name = crate::class_name(126).to_owned();
+        assert!(
+            AssetFilter::new(&["NavMeshProjectSettings".into()], &[], &[])
+                .unwrap()
+                .matches(&asset)
+        );
+        assert!(
+            AssetFilter::new(&["NavMeshAreas".into()], &[], &[])
+                .unwrap()
+                .matches(&asset)
+        );
     }
 }

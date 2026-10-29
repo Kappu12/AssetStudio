@@ -223,17 +223,46 @@ fn stripped_mono_behaviour_previews_and_exports_with_external_schema() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["m_Name"], "Hero");
     assert_eq!(value["score"], 123);
-    for mode in [ExportMode::Json, ExportMode::Convert] {
+    for mode in [ExportMode::Json, ExportMode::Convert, ExportMode::Dump] {
         let directory = output.path().join(format!("{mode:?}"));
         let report = session
             .export(&[key], &directory, &ExportOptions { mode, ..options })
             .unwrap();
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(report.written.len(), 1);
-        let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&report.written[0]).unwrap()).unwrap();
-        assert_eq!(value["score"], 123);
+        let bytes = fs::read(&report.written[0]).unwrap();
+        if mode == ExportMode::Dump {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("SInt32 score = 123"), "{text}");
+            assert!(text.contains("m_Name") && text.contains("Hero"), "{text}");
+        } else {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["score"], 123);
+        }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_helper_cannot_report_success_while_omitting_requested_types() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let helper = directory.path().join("empty-schema-helper");
+    fs::write(
+        &helper,
+        b"#!/bin/sh\nprintf '%s' '{\"version\":1,\"entries\":[]}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut session = Session::from_regions(
+        [("CAB-schema".into(), Region::from_bytes(mono_fixture()))],
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let error = session
+        .load_dummy_dlls(directory.path(), &helper)
+        .unwrap_err();
+    assert!(error.to_string().contains("omitted requested type"));
 }
 
 fn align(bytes: &mut Vec<u8>, boundary: usize) {

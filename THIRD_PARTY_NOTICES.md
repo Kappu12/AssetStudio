@@ -35,3 +35,17 @@ are dependencies, not shipped .NET or Autodesk/FMOD helper DLLs.
 No Autodesk FBX SDK, FMOD DLL, Oodle DLL, or .NET runtime is distributed by the
 Rust package. Proprietary codec paths require separately verified replacements
 before their old behavior can be claimed as equivalent.
+
+## Managed schema recovery
+
+The native PE/CLI table parser uses MIT-licensed `clrmeta` 0.1.0, copyright
+(c) 2026 coconutbird. AssetStudio owns the bounded PE projection, assembly
+resolution and Unity serialization code that surrounds it.
+
+Hardcoded Unity serialization template portions and synthetic acceptance
+fixtures derive from MIT-licensed `unity-typetree-gen` 0.3.2, copyright (c) 2026
+Jakob Hellermann and (c) 2020 nesrak1. The exact notice is retained in
+`packaging/licenses/managed-schema-templates/LICENSE` and accompanies release
+ZIPs. The upstream test DLLs, C# fixture source and independent reference
+snapshots remain development-only data and are never executed or packaged.
+The application does not depend on the upstream crate or its GPL parser.

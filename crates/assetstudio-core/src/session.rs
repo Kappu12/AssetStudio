@@ -33,9 +33,11 @@ pub struct Session {
     assets: Vec<AssetRecord>,
     by_key: HashMap<AssetKey, usize>,
     diagnostics: Vec<String>,
+    warnings: Vec<String>,
     pub(crate) xor_key: u8,
     pub(crate) mono_schemas: unity_rs_core::mono_schema::MonoBehaviourSchemaRegistry,
     input_paths: Vec<PathBuf>,
+    protected_sources: crate::source_protection::SourceProtection,
 }
 
 impl Session {
@@ -62,20 +64,41 @@ impl Session {
         let mut expanded = 0u64;
         let mut objects = 0usize;
         for input in inputs {
-            let canonical = std::fs::canonicalize(input)
-                .with_context(|| format!("resolve selected input {input:?}"))?;
+            let canonical = match std::fs::canonicalize(input) {
+                Ok(path) => path,
+                Err(error) if options.continue_on_error => {
+                    parts
+                        .diagnostics
+                        .push(unity_rs_core::loader::LoadDiagnostic {
+                            path: input.to_string_lossy().into_owned(),
+                            message: format!("resolve selected input: {error}"),
+                        });
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("resolve selected input {input:?}"));
+                }
+            };
             if !input_paths.insert(canonical.clone()) {
                 continue;
             }
             canonical_inputs.push(canonical.clone());
-            let result = match crate::games::prepare_regions(
-                &canonical,
-                &options.game,
-                MAX_EXPORT_FILE_BYTES,
-            )? {
-                Some(regions) => AssetCollection::load_regions_with_options(regions, load.clone()),
-                None => AssetCollection::load_path_with_options(&canonical, load.clone()),
-            };
+            let mut preprocess_diagnostics = Vec::new();
+            let result: Result<AssetCollection> = (|| {
+                let (prepared, diagnostics) = crate::games::prepare_regions_with_policy(
+                    &canonical,
+                    &options.game,
+                    MAX_EXPORT_FILE_BYTES,
+                    options.continue_on_error,
+                )?;
+                preprocess_diagnostics = diagnostics;
+                Ok(match prepared {
+                    Some(regions) => {
+                        AssetCollection::load_regions_with_options(regions, load.clone())?
+                    }
+                    None => AssetCollection::load_path_with_options(&canonical, load.clone())?,
+                })
+            })();
             let collection = match result {
                 Ok(value) => value,
                 Err(error) if options.continue_on_error => {
@@ -92,6 +115,14 @@ impl Session {
                         .with_context(|| format!("open selected input {canonical:?}"));
                 }
             };
+            for message in preprocess_diagnostics {
+                parts
+                    .diagnostics
+                    .push(unity_rs_core::loader::LoadDiagnostic {
+                        path: canonical.to_string_lossy().into_owned(),
+                        message,
+                    });
+            }
             let next = collection.into_parts();
             for file in next.serialized_files {
                 if !files.insert(file.path.clone()) {
@@ -136,9 +167,12 @@ impl Session {
         let mut collection = AssetCollection::from_parts(parts);
         collection.resolve_object_metadata(load.limits)?;
         let mut session = Self::from_studio(Studio::from_collection(collection), options.xor_key)?;
+        for path in &canonical_inputs {
+            session.protected_sources.include_input(path)?;
+        }
         session.input_paths = canonical_inputs;
         if let Some(warning) = crate::games::profile_warning(&options.game) {
-            session.diagnostics.push(warning.to_owned());
+            session.warnings.push(warning.to_owned());
         }
         Ok(session)
     }
@@ -146,16 +180,23 @@ impl Session {
     pub fn open(input: &Path, options: &LoadOptions) -> Result<Self> {
         crate::games::validate_profile(&options.game)?;
         let load = backend_options(options)?;
-        let studio =
-            match crate::games::prepare_regions(input, &options.game, MAX_EXPORT_FILE_BYTES)? {
-                Some(regions) => Studio::open_regions_with_options(regions, load),
-                None => Studio::open_with_options(input, load),
-            }
-            .with_context(|| format!("open Unity input {input:?}"))?;
+        let (prepared, preprocess_diagnostics) = crate::games::prepare_regions_with_policy(
+            input,
+            &options.game,
+            MAX_EXPORT_FILE_BYTES,
+            options.continue_on_error,
+        )?;
+        let studio = match prepared {
+            Some(regions) => Studio::open_regions_with_options(regions, load),
+            None => Studio::open_with_options(input, load),
+        }
+        .with_context(|| format!("open Unity input {input:?}"))?;
         let mut session = Self::from_studio(studio, options.xor_key)?;
+        session.protected_sources.include_input(input)?;
         session.input_paths = vec![std::fs::canonicalize(input)?];
+        session.diagnostics.extend(preprocess_diagnostics);
         if let Some(warning) = crate::games::profile_warning(&options.game) {
-            session.diagnostics.push(warning.to_owned());
+            session.warnings.push(warning.to_owned());
         }
         Ok(session)
     }
@@ -232,10 +273,18 @@ impl Session {
             assets,
             by_key,
             diagnostics,
+            warnings: Vec::new(),
             xor_key,
             mono_schemas: unity_rs_core::mono_schema::MonoBehaviourSchemaRegistry::default(),
             input_paths: Vec::new(),
+            protected_sources: crate::source_protection::SourceProtection::default(),
         };
+        for file in session.studio.collection().serialized_files() {
+            session.protected_sources.include_label(&file.path)?;
+        }
+        for resource in session.studio.collection().resources() {
+            session.protected_sources.include_label(&resource.path)?;
+        }
         session.resolve_index_metadata()?;
         Ok(session)
     }
@@ -247,16 +296,33 @@ impl Session {
         &self.diagnostics
     }
 
+    /// Advisories do not indicate a failed input or make an operation partial.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Refuses a destination that identifies any original input or companion resource.
+    pub fn check_output_target(&self, target: &Path) -> Result<()> {
+        self.protected_sources.check(target)
+    }
+
+    /// Registers an auxiliary input (schema, key file, index or DLL folder) as read-only provenance.
+    pub fn protect_input_path(&mut self, path: &Path) -> Result<()> {
+        self.protected_sources.include_input(path)
+    }
+
     pub fn input_paths(&self) -> &[PathBuf] {
         &self.input_paths
     }
 
     /// Loads a trusted, non-executable JSON schema document for stripped MonoBehaviours.
     pub fn load_schemas(&mut self, path: &Path) -> Result<usize> {
+        self.protect_input_path(path)?;
         crate::schema::extend_registry(&mut self.mono_schemas, path)
     }
 
     pub fn recover_containers(&mut self, index_path: &Path) -> Result<usize> {
+        self.protect_input_path(index_path)?;
         crate::recovery::AssetIndex::from_path(index_path)?.apply(&mut self.assets)
     }
 
@@ -383,6 +449,7 @@ impl Session {
     pub fn preview(&self, key: AssetKey) -> Result<Preview> {
         let object = self.object(key)?;
         match object.class_id() {
+            1 | 95 => crate::model_preview::preview_model(self, key),
             28 => {
                 let mut image = object.decode_texture_mip(0, preview_texture_limits())?;
                 flip_rgba_rows(&mut image)?;
@@ -437,6 +504,14 @@ impl Session {
                 String::from_utf8_lossy(&object.read_shader_text(MAX_PREVIEW_TEXT_BYTES as u64)?)
                     .into_owned(),
             )),
+            128 => {
+                let maximum = crate::font_preview::MAX_FONT_BYTES as u64;
+                let font = object.read_font(SimpleAssetReadLimits {
+                    maximum_payload_bytes: maximum,
+                    ..SimpleAssetReadLimits::default()
+                })?;
+                crate::font_preview::render(&font.payload.read_to_vec(maximum)?)
+            }
             114 | 1210 => Ok(Preview::Text(String::from_utf8(
                 self.object_json_with_limit(key, MAX_PREVIEW_TEXT_BYTES)?,
             )?)),
@@ -496,36 +571,203 @@ impl Session {
             .collect())
     }
 
+    pub fn extract_paths(
+        inputs: &[PathBuf],
+        output: &Path,
+        options: &LoadOptions,
+        overwrite: bool,
+    ) -> Result<OperationReport> {
+        Self::extract_paths_with_auxiliary_inputs(inputs, output, options, overwrite, &[])
+    }
+
+    pub fn extract_paths_with_auxiliary_inputs(
+        inputs: &[PathBuf],
+        output: &Path,
+        options: &LoadOptions,
+        overwrite: bool,
+        auxiliary: &[PathBuf],
+    ) -> Result<OperationReport> {
+        if auxiliary.len() > 100_000 {
+            bail!("auxiliary input count exceeds limit");
+        }
+        if inputs.is_empty() {
+            bail!("no extraction inputs selected");
+        }
+        if inputs.len() > 100_000 {
+            bail!("extraction input count exceeds limit");
+        }
+        let mut protection = crate::source_protection::SourceProtection::default();
+        for path in auxiliary {
+            protection.include_input(path)?;
+        }
+        let mut readable = Vec::new();
+        let mut result = OperationReport::default();
+        for (index, input) in inputs.iter().enumerate() {
+            match protection.include_input(input) {
+                Ok(()) => readable.push((index, input)),
+                Err(error) if options.continue_on_error => {
+                    result.failed.push(format!("input {input:?}: {error:#}"))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let mut remaining_output = MAX_EXPORT_TOTAL_BYTES;
+        for (index, input) in readable {
+            let target = if inputs.len() == 1 {
+                output.to_owned()
+            } else {
+                output.join(format!("input-{:04}", index + 1))
+            };
+            match Self::extract_with_guard(
+                input,
+                &target,
+                options,
+                overwrite,
+                Some(&protection),
+                &mut remaining_output,
+            ) {
+                Ok(report) => {
+                    result.written.extend(report.written);
+                    result.skipped.extend(report.skipped);
+                    result.failed.extend(report.failed);
+                }
+                Err(error) if options.continue_on_error => {
+                    result.failed.push(format!("input {input:?}: {error:#}"))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(result)
+    }
+
     pub fn extract(
         input: &Path,
         output: &Path,
         options: &LoadOptions,
         overwrite: bool,
     ) -> Result<OperationReport> {
+        let mut remaining_output = MAX_EXPORT_TOTAL_BYTES;
+        Self::extract_with_guard(
+            input,
+            output,
+            options,
+            overwrite,
+            None,
+            &mut remaining_output,
+        )
+    }
+
+    fn extract_with_guard(
+        input: &Path,
+        output: &Path,
+        options: &LoadOptions,
+        overwrite: bool,
+        additional: Option<&crate::source_protection::SourceProtection>,
+        remaining_output: &mut u64,
+    ) -> Result<OperationReport> {
         crate::games::validate_profile(&options.game)?;
         let load = backend_options(options)?;
+        let mut protection = crate::source_protection::SourceProtection::default();
+        protection.include_input(input)?;
+        let destination = crate::output::SafeOutput::new(output)?;
+        let canonical_input = std::fs::canonicalize(input)?;
+        if canonical_input.is_dir() && destination.root().starts_with(&canonical_input) {
+            bail!("extraction output must be outside the input directory");
+        }
+        // Native extraction writes only into our private staging directory.
+        // Every eventual user destination is checked before atomic publication.
+        let staging = tempfile::Builder::new()
+            .prefix(".assetstudio-extract-")
+            .tempdir_in(destination.root())?;
         let mut extraction = ExtractionOptions {
-            overwrite_existing: overwrite,
+            overwrite_existing: false,
             unity_cn_key: load.unity_cn_key,
             ..ExtractionOptions::default()
         };
+        extraction.limits.maximum_output_bytes = *remaining_output;
         let mut result = OperationReport::default();
-        match crate::games::prepare_regions(input, &options.game, MAX_EXPORT_FILE_BYTES)? {
+        let (prepared, preprocess_diagnostics) = crate::games::prepare_regions_with_policy(
+            input,
+            &options.game,
+            MAX_EXPORT_FILE_BYTES,
+            options.continue_on_error,
+        )?;
+        result.failed.extend(preprocess_diagnostics);
+        match prepared {
             Some(regions) => {
                 let mut written = 0u64;
                 for (label, region) in regions {
-                    extraction.limits.maximum_output_bytes = MAX_EXPORT_TOTAL_BYTES
+                    extraction.limits.maximum_output_bytes = (*remaining_output)
                         .checked_sub(written)
                         .context("extraction output budget exceeded")?;
-                    let report = extract_region(&label, region, output, extraction.clone())?;
+                    let report =
+                        extract_region(&label, region, staging.path(), extraction.clone())?;
                     written = written
                         .checked_add(report.output_bytes)
                         .context("extraction size overflow")?;
                     append_extraction(&mut result, report);
                 }
             }
-            None => append_extraction(&mut result, extract_path(input, output, extraction)?),
+            None => append_extraction(
+                &mut result,
+                extract_path(input, staging.path(), extraction)?,
+            ),
         }
+        let staged = std::mem::take(&mut result.written);
+        let mut published = std::collections::HashSet::new();
+        for source in staged {
+            let relative = source
+                .strip_prefix(staging.path())
+                .context("extracted output escaped its staging root")?;
+            let parent = relative.parent().unwrap_or(Path::new(""));
+            let folder = destination.directory(parent)?;
+            let target = folder.join(
+                relative
+                    .file_name()
+                    .context("extracted file has no filename")?,
+            );
+            if !published.insert(target.clone()) {
+                continue;
+            }
+            let operation = (|| -> Result<bool> {
+                protection.check(&target)?;
+                if let Some(guard) = additional {
+                    guard.check(&target)?;
+                }
+                let limit = *remaining_output;
+                let mut length = 0u64;
+                let written = crate::output::atomic_write(&target, overwrite, |file| {
+                    use std::io::Read as _;
+                    let mut input = std::fs::File::open(&source)?.take(limit.saturating_add(1));
+                    length = std::io::copy(&mut input, file)?;
+                    if length > limit {
+                        bail!("extracted output exceeds cumulative byte limit");
+                    }
+                    Ok(())
+                })?;
+                if written {
+                    *remaining_output = remaining_output
+                        .checked_sub(length)
+                        .context("extraction publication size exceeds cumulative limit")?;
+                }
+                Ok(written)
+            })();
+            match operation {
+                Ok(true) => result.written.push(target),
+                Ok(false) => result
+                    .skipped
+                    .push(format!("existing output: {}", target.display())),
+                Err(error) => result
+                    .failed
+                    .push(format!("extracted output {}: {error:#}", target.display())),
+            }
+        }
+        let temporary = staging.path().to_string_lossy();
+        let final_root = destination.root().to_string_lossy();
+        for message in &mut result.skipped {
+            *message = message.replace(temporary.as_ref(), final_root.as_ref());
+        }
+
         Ok(result)
     }
 }
@@ -636,5 +878,39 @@ mod tests {
     fn bounded_names_do_not_cut_utf8() {
         let name = "😀".repeat(2000);
         assert!(bounded_name(&name).len() <= 4096);
+    }
+    #[test]
+    fn extraction_byte_budget_is_shared_across_inputs() {
+        let source = tempfile::tempdir().unwrap();
+        let first = source.path().join("first.resource");
+        let second = source.path().join("second.resource");
+        std::fs::write(&first, b"first payload").unwrap();
+        std::fs::write(&second, b"second payload").unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let mut remaining = 20;
+        let first_report = Session::extract_with_guard(
+            &first,
+            &output.path().join("first"),
+            &LoadOptions::default(),
+            false,
+            None,
+            &mut remaining,
+        )
+        .unwrap();
+        assert_eq!(first_report.written.len(), 1);
+        assert_eq!(remaining, 7);
+        let second_report = Session::extract_with_guard(
+            &second,
+            &output.path().join("second"),
+            &LoadOptions::default(),
+            false,
+            None,
+            &mut remaining,
+        )
+        .unwrap();
+        assert!(second_report.written.is_empty());
+        assert!(!second_report.failed.is_empty());
+        assert_eq!(remaining, 7);
+        assert!(!output.path().join("second/second.resource").exists());
     }
 }
