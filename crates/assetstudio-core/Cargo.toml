@@ -1,0 +1,21 @@
+[package]
+name = "assetstudio-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+unity_rs_core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+tempfile.workspace = true
+aes = "0.8"
+md-5 = "0.10"
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "std"] }
+lzma-rust2 = { version = "0.21", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

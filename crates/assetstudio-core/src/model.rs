@@ -1,0 +1,295 @@
+use std::{
+    collections::HashSet,
+    fs::{self, File},
+    io::Write,
+    path::Path,
+};
+
+use crate::output::{SafeOutput, component};
+use crate::session::{MAX_EXPORT_FILE_BYTES, MAX_EXPORT_TOTAL_BYTES};
+use crate::{AssetKey, ModelFormat, OperationReport, Session};
+use anyhow::{Context, Result, bail};
+use unity_rs_core::{
+    animation_graph::{AnimationGraphLimits, build_animation_graph},
+    fbx_ascii::write_model_ir_fbx_ascii_with_textures,
+    fbx_binary_scene::write_model_ir_fbx_binary_full,
+    image_export::ImageFormat as BackendImageFormat,
+    model_animation::{ModelAnimationLimits, build_model_animations},
+    model_ir::{ModelIr, ModelIrLimits, build_model_ir, build_model_ir_for_game_object},
+    obj_scene::{write_model_ir_mtl, write_model_ir_obj},
+    scene_hierarchy::{SceneHierarchyLimits, SceneObjectKey},
+    scene_textures::{SceneTextureLimits, SceneTextureSet},
+};
+
+struct ModelBudget {
+    used: u64,
+    maximum: u64,
+}
+
+impl Session {
+    /// Exports whole-scene models or one independent package for each selected root.
+    /// Packages contain the model and every successfully decoded material texture.
+    pub fn export_scene(
+        &self,
+        output: &Path,
+        format: ModelFormat,
+        roots: &[AssetKey],
+    ) -> Result<OperationReport> {
+        self.export_scene_with_limit(output, format, roots, MAX_EXPORT_TOTAL_BYTES)
+    }
+
+    pub(crate) fn export_scene_with_limit(
+        &self,
+        output: &Path,
+        format: ModelFormat,
+        roots: &[AssetKey],
+        maximum_total: u64,
+    ) -> Result<OperationReport> {
+        if roots.len() > 1_000_000 {
+            bail!("model root count exceeds catalog limit");
+        }
+        let destination = SafeOutput::new(output)?;
+        let hierarchy = self
+            .studio
+            .scene_hierarchy(SceneHierarchyLimits::default())?;
+        let mut report = OperationReport::default();
+        let mut budget = ModelBudget {
+            used: 0,
+            maximum: maximum_total,
+        };
+        if roots.is_empty() {
+            let model = build_model_ir(
+                self.studio.collection(),
+                &hierarchy,
+                ModelIrLimits::default(),
+            )?;
+            self.write_model_package(
+                &destination,
+                "scene",
+                model,
+                format,
+                &mut budget,
+                &mut report,
+            )?;
+        } else {
+            let mut seen = HashSet::new();
+            for &root in roots {
+                if !seen.insert(root) {
+                    continue;
+                }
+                let selected = SceneObjectKey {
+                    file_index: root.file_index,
+                    path_id: root.path_id,
+                };
+                let selected = if self.object(root)?.class_id() == 95 {
+                    hierarchy
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.animator
+                                .as_ref()
+                                .is_some_and(|animator| animator.component == selected)
+                        })
+                        .map(|node| node.object)
+                        .context("selected Animator has no resolved GameObject")?
+                } else {
+                    selected
+                };
+                let Some(node) = hierarchy.node(selected) else {
+                    report.failed.push(format!(
+                        "selected root {root:?} is not a resolved GameObject"
+                    ));
+                    continue;
+                };
+                let name = format!(
+                    "{}_{}_{}",
+                    component(&node.name),
+                    selected.file_index,
+                    selected.path_id
+                );
+                let result = build_model_ir_for_game_object(
+                    self.studio.collection(),
+                    &hierarchy,
+                    selected,
+                    ModelIrLimits::default(),
+                )
+                .map_err(anyhow::Error::from)
+                .and_then(|model| {
+                    self.write_model_package(
+                        &destination,
+                        &name,
+                        model,
+                        format,
+                        &mut budget,
+                        &mut report,
+                    )
+                });
+                if let Err(error) = result {
+                    report.failed.push(format!("model {name:?}: {error:#}"));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    fn write_model_package(
+        &self,
+        destination: &SafeOutput,
+        name: &str,
+        model: ModelIr,
+        format: ModelFormat,
+        budget: &mut ModelBudget,
+        report: &mut OperationReport,
+    ) -> Result<()> {
+        if !model.nodes.iter().any(|node| {
+            node.export_content
+                && node
+                    .renderers
+                    .iter()
+                    .any(|renderer| renderer.mesh.is_some())
+        }) {
+            bail!("model contains no renderable mesh");
+        }
+        let target = destination.root().join(name);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                bail!("model target is not a regular directory: {target:?}")
+            }
+            Ok(_) => {
+                report
+                    .skipped
+                    .push(format!("existing model package: {}", target.display()));
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect model output"),
+        }
+        let remaining = budget
+            .maximum
+            .checked_sub(budget.used)
+            .context("model output budget exhausted")?;
+        let textures = SceneTextureSet::from_model(
+            self.studio.collection(),
+            &model,
+            BackendImageFormat::Png,
+            SceneTextureLimits {
+                maximum_total_encoded_bytes: remaining.min(MAX_EXPORT_FILE_BYTES),
+                ..SceneTextureLimits::default()
+            },
+        )?;
+        let texture_bytes = textures.textures.iter().try_fold(0u64, |sum, texture| {
+            sum.checked_add(texture.encoded.len() as u64)
+                .context("texture size overflow")
+        })?;
+        let model_budget = remaining
+            .checked_sub(texture_bytes)
+            .context("model output budget exhausted")?
+            .min(MAX_EXPORT_FILE_BYTES);
+        let stage = tempfile::Builder::new()
+            .prefix(".assetstudio-model-")
+            .tempdir_in(destination.root())?;
+        let extension = if format == ModelFormat::Obj {
+            "obj"
+        } else {
+            "fbx"
+        };
+        let model_name = format!("{name}.{extension}");
+        let mut file = File::create(stage.path().join(&model_name))?;
+        let mut extra_names = Vec::new();
+        match format {
+            ModelFormat::FbxAscii | ModelFormat::FbxBinary => {
+                let graph = build_animation_graph(
+                    self.studio.collection(),
+                    &hierarchy_for_animation(self)?,
+                    AnimationGraphLimits::default(),
+                )?;
+                let animations = build_model_animations(
+                    self.studio.collection(),
+                    &model,
+                    &graph,
+                    ModelAnimationLimits {
+                        maximum_keyframes: 2_000_000,
+                        maximum_total_sample_values: 16 * 1024 * 1024,
+                        ..ModelAnimationLimits::default()
+                    },
+                )?;
+                if format == ModelFormat::FbxAscii {
+                    write_model_ir_fbx_ascii_with_textures(
+                        &model,
+                        &animations,
+                        &textures,
+                        &mut file,
+                        model_budget,
+                    )?;
+                } else {
+                    write_model_ir_fbx_binary_full(
+                        &model,
+                        Some(&animations),
+                        Some(&textures),
+                        &mut file,
+                        model_budget,
+                    )?;
+                }
+            }
+            ModelFormat::Obj => {
+                let material_name = format!("{name}.mtl");
+                write_model_ir_obj(&model, Some(&material_name), &mut file, model_budget)?;
+                let mut material = File::create(stage.path().join(&material_name))?;
+                write_model_ir_mtl(&model, &textures, &mut material, model_budget)?;
+                material.flush()?;
+                material.sync_all()?;
+                extra_names.push(material_name);
+            }
+        }
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        for texture in &textures.textures {
+            // The backend already validates names; reject separators again at the application boundary.
+            let path = Path::new(&texture.file_name);
+            if path.components().count() != 1 || path.file_name().is_none() {
+                bail!("invalid model texture filename");
+            }
+            let mut image = File::create(stage.path().join(path))?;
+            image.write_all(&texture.encoded)?;
+            image.sync_all()?;
+            extra_names.push(texture.file_name.clone());
+        }
+        let mut package_bytes = 0u64;
+        for entry in fs::read_dir(stage.path())? {
+            package_bytes = package_bytes
+                .checked_add(entry?.metadata()?.len())
+                .context("model package size overflow")?;
+        }
+        if package_bytes > remaining {
+            bail!("model package exceeds cumulative output limit");
+        }
+        // A complete directory is published together, so existing textures never mix with a new model.
+        fs::rename(stage.path(), &target).context("publish model package")?;
+        budget.used = budget
+            .used
+            .checked_add(package_bytes)
+            .context("model output size overflow")?;
+        report.written.push(target.join(model_name));
+        report
+            .written
+            .extend(extra_names.into_iter().map(|file| target.join(file)));
+        report
+            .failed
+            .extend(textures.skipped.into_iter().map(|entry| {
+                format!(
+                    "model {name:?} texture {:?}: {}",
+                    entry.property, entry.reason
+                )
+            }));
+        Ok(())
+    }
+}
+
+fn hierarchy_for_animation(
+    session: &Session,
+) -> Result<unity_rs_core::scene_hierarchy::SceneHierarchy> {
+    Ok(session
+        .studio
+        .scene_hierarchy(SceneHierarchyLimits::default())?)
+}

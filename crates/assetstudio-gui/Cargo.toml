@@ -1,0 +1,21 @@
+[package]
+name = "assetstudio-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "AssetStudio"
+path = "src/main.rs"
+
+[dependencies]
+assetstudio-core.workspace = true
+anyhow.workspace = true
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+regex.workspace = true
+rodio = { version = "=0.21.1", default-features = false, features = ["playback", "hound"] }
+
+[lints]
+workspace = true
