@@ -39,3 +39,15 @@ The original copyright notices and backend attribution must ship with packages.
 ## Validation record
 
 Implementation and verification are in progress. No release has been created.
+
+## Published development checkpoints
+
+- `ab1f02c`: feature inventory and dependency provenance.
+- `206d3fd`: native Rust desktop/CLI/core checkpoint; 88 application tests and
+  strict Clippy passed for this exact source snapshot.
+- `281fd7a`: GitHub-hosted three-platform validation and tag-only ZIP packaging,
+  without Actions artifact or cache storage. No tag or release was created.
+
+Additional compatibility ports and both review sweeps are in progress. The
+prepared CI workflow has not yet produced a GitHub-hosted run for this branch;
+local test success must not be reported as a hosted runner result.
