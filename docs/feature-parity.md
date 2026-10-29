@@ -1,30 +1,39 @@
 # Feature migration checklist
 
-Reference: `94318fa` (managed/C++ tree). This is a development branch, not a
-released replacement. A checked implementation is distinct from verification
-against real game files. Update this table with evidence as work lands.
+Reference: `94318fa4eecb79190330da933bbc3d7de49055ed`. This branch is a
+development migration, not a feature-complete replacement for the original
+fork. An implemented path, a synthetic acceptance check, and a real-game
+acceptance check are separate kinds of evidence.
 
-| Area | Existing behavior to preserve | Rust verification status |
+| Area | Rust implementation and evidence | Remaining limits |
 | --- | --- | --- |
-| Load | Files, folders, dependencies, split files, UnityFS/Web/Raw/WebData, compressed wrappers | In progress |
-| Format versions | Serialized assets, type trees, stripped layouts, Unity 6000 texture/renderer changes | In progress |
-| Catalog | Class, name, container, source, path ID, size, regex selection, sorting | In progress |
-| Text/data | TextAsset, raw bytes, type-tree dump/JSON, MonoBehaviour JSON | In progress |
-| Images | Texture2D, Sprite/Atlas, compression formats, PNG/JPEG/BMP/TGA | In progress |
-| Audio/video/font | AudioClip, VideoClip, MovieTexture, Font; original payload and supported conversions | In progress |
-| Mesh | Decoded vertices/indices, OBJ, preview | In progress |
-| Scene | GameObject/Transform hierarchy; selected/merged model export | In progress |
-| FBX | Materials/textures, skins, blend shapes, animation/controller/avatar integration | In progress |
-| Lists/maps | Asset list JSON/XML, grouping by type/container/source, collision handling | In progress |
-| Game variants | GameManager profiles and ImportHelper/Crypto/container variants | In progress; see game-compatibility.md |
-| Recovery | asset_index container recovery, CAB maps/cache workflows | In progress |
-| Managed schemas | Dummy assembly schema recovery and missing MonoBehaviour type trees | In progress |
-| Desktop | Native file/folder loading, drag/drop, preview, hierarchy, filtering, export settings, diagnostics | In progress |
-| CLI | Legacy positional interface, aliases, filtering, extract/map/export operations, exit codes | In progress |
-| Delivery | Windows GUI+CLI ZIP after tag build/test; no Actions artifacts or caches | In progress |
+| Loading | Shared file/folder sessions, multi-input loading, split files, dependencies, UnityFS/Web/Raw/WebData and backend compression readers. Acceptance tests construct serialized v17/v22 files in both byte orders and plain/LZ4 UnityFS with streamed resources. | No representative real-game corpus was supplied. Not every backend format/codec has an application acceptance fixture. |
+| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Extremely large catalogs are bounded; these limits differ from the original unbounded application. |
+| Text and data | TextAsset, raw object bytes, type-tree Dump/JSON, stripped MonoBehaviour schemas and MiHoYoBinData XOR. Integration tests check exact exported bytes, actual parsed trees and malformed-input failures. | Generic type-tree output requires a valid embedded or recovered schema. A raw fallback is not counted as decoded conversion. |
+| Images | Backend Texture2D/Sprite/atlas decoding and PNG/JPEG/BMP/TGA export; GUI image zoom, RGB channel toggles and alpha isolation. Unity 6000 inline and streamed texture fixtures check pixels and row orientation. | The backend's full texture-format/platform matrix has not been independently exercised here. |
+| Audio | Backend original-payload/WAV conversion; native streaming WAV playback with pause, stop, seek, volume and loop. Device-free tests check decoded samples, malformed headers, streaming seeks and actual sink state. | No physical audio output device was available. Proprietary codecs and every historical audio layout are not established as equivalent. |
+| Video and fonts | Original VideoClip/MovieTexture/font payload export uses the backend. TrueType `glyf` fonts have a bounded in-memory sample preview, including a preflight against repeated composite expansion. | No embedded video player or all-format media acceptance claim. CFF/CFF2, variable and bitmap-only font previews return explicit errors; original font export is available. |
+| Mesh and model preview | Mesh geometry decoding/OBJ export; static GameObject/Animator hierarchy geometry preview. GUI offers shaded, wireframe and combined views with rotate/pan/zoom. Tests check world transforms, repeated instances, indices and malformed geometry. | Original source-normal and vertex-color preview modes are not ported. Static preview does not evaluate animation or render material textures. |
+| Scene hierarchy | Iterative hierarchy display and selected/all scene model export. Model fixtures contain real GameObject, Transform, mesh, renderer, material and animation objects. | A live native window/GPU was unavailable; widget rendering and state were tested headlessly. |
+| FBX and OBJ | ASCII/binary FBX and OBJ+MTL+PNG; backend model materials, skins, blend shapes and animation integration. Static exports can disable animations/textures. Root legacy curves are repaired before writing. Independent ufbx reads verify generated geometry, materials, durations and actual curve samples, including shared clip owners. | Static-batched renderers are rejected in model export and preview: the backend drops the per-renderer subset/root information required for correct geometry. Standard renderer readers cover Unity 2017.3–6000.3 and Tuanjie 2022.3; older fork layouts need ports. Not every skin/blend-shape/controller/avatar path has an independent fixture. Original FBX-version, UV-remap, Euler-filter, bone-size and detailed skin/material/blend-shape settings are not all exposed. |
+| AnimationClip | Explicit and packed legacy curves export as Unity YAML `.anim`; FBX root translation, Euler, quaternion and packed rotation tracks have regressions and independent-reader checks. | Standalone `.anim` expansion of muscle/dense/streamed/ACL data is incomplete and fails explicitly rather than writing an empty animation. |
+| Asset maps | JSON/XML lists, original MessagePack `.map` caches, exact object selection and confined cache source resolution. Genuine MessagePack-CSharp plain/LZ4 single/array/multiblock fixtures test interoperability. | Legacy caches without serialized-file identity fail on ambiguous PathID/class matches. This preserves correctness rather than guessing an object. |
+| CAB maps and recovery | Original BinaryWriter `.bin` caches, transitive dependency graphs, split groups, source-base relocation and offline asset-index container recovery. Tests use independently encoded bytes and real constructed UnityFS files. | Proprietary decrypted-stream nonzero CAB offsets, game-specific container equivalence and automatic remote asset-index downloads are not ported. |
+| Managed schemas | Native PE/ECMA metadata inspection in a bounded short-lived Rust child; DLLs are never executed. Three Unity-version sets of 20 independent reference snapshots and child-process stripped-object fixtures check fields, generics, arrays, strings, references and alignment. | Dynamic SerializeReference runtime payload reconstruction, multi-module assemblies and unsupported signatures still require additional work. |
+| Game profiles | 22 accepted profiles including standard/UnityCN and implemented wrappers; reference crypto vectors, malformed-input checks, and nine exact NetEase comparisons against original C# execution. See [game compatibility](game-compatibility.md). | 17 specialized profiles are explicitly rejected. No named proprietary game's current live build has been verified. Encrypted game-profile split groups must be joined first. |
+| Desktop behavior | Native dialogs, folder/file/drop/reload, virtualized catalog, worker-side filtering/preview/export, hierarchy, diagnostics, recovery/schema/key controls and bounded atomic preferences without raw key persistence. Regression tests cover stale worker results and audio cancellation. | Actual OS dialog, graphics-driver and sound-device interaction needs native acceptance testing. |
+| CLI | Legacy positional interface and useful aliases, list/inspect/scene/extract/map/model/export operations, map/cache loading, schemas, keys and explicit exit codes. Child-process tests exercise actual binary invocations. | Unsupported legacy behavior is a visible error. See [CLI details](../crates/assetstudio-cli/README.md). |
+| Output preservation | Staged atomic output, no-clobber defaults, portable names, symlink/path checks, shared budgets and protection for loaded sources, split/resource companions, DLLs, schema/index/cache/key inputs and hardlink aliases. Regression tests compare original bytes after overwrite attempts. | No claim of protection against a separate hostile process concurrently replacing filesystem entries. |
+| Delivery | Three-OS GitHub-hosted workflow definition, Windows static CRT and PE import checks, direct tag-only release ZIP upload with download/hash verification; 32 Python policy/packaging tests. No Actions artifacts or caches. | A hosted run has not yet been observed for this branch. Local Windows GNU cross-checking does not replace an actual MSVC build or macOS runner. No tag or release has been created. |
 
 ## Review evidence
 
-Sweep 1: pending implementation.
-Sweep 2: pending integration and fixes.
-Real game-file acceptance: no user fixture corpus has been supplied.
+Two independent source review sweeps and their regressions are recorded in
+[review-sweeps.md](review-sweeps.md). The review scope is the first-party Rust
+application, adapters and delivery scripts, with targeted backend source tracing;
+it is not a fresh audit of every transitive dependency.
+
+Synthetic inputs cover deterministic behavior and malformed cases. They cannot
+establish that every feature of the original fork works on real game data, and
+passing tests are not a zero-bug guarantee. The limits above must remain visible
+until implementation and corresponding acceptance evidence exist.

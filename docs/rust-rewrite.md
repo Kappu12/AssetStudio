@@ -38,7 +38,12 @@ The original copyright notices and backend attribution must ship with packages.
 
 ## Validation record
 
-Implementation and verification are in progress. No release has been created.
+The native Rust application and pipeline are implemented on the development
+branch, with explicit remaining compatibility gaps. The final combined local
+snapshot passes 213 Rust tests, strict Clippy, formatting, an optimized Linux
+build, native-program smoke checks, Windows GNU cross-target checking and 32
+pipeline tests. Two independent full first-party source sweeps are recorded in
+[review-sweeps.md](review-sweeps.md). No release has been created.
 
 ## Published development checkpoints
 
@@ -47,7 +52,16 @@ Implementation and verification are in progress. No release has been created.
   strict Clippy passed for this exact source snapshot.
 - `281fd7a`: GitHub-hosted three-platform validation and tag-only ZIP packaging,
   without Actions artifact or cache storage. No tag or release was created.
+- `157892d`: verified development checkpoint record.
+- `4271053`: portable Windows CRT/PE checks, dependency license packaging,
+  public key resource and game compatibility accounting.
+- `6fad9ef`: native DLL schema recovery, CAB/AssetMap interoperability,
+  font/static-model previews, animation exports, desktop controls and review
+  regressions; 213 Rust and 32 pipeline tests pass.
 
-Additional compatibility ports and both review sweeps are in progress. The
-prepared CI workflow has not yet produced a GitHub-hosted run for this branch;
-local test success must not be reported as a hosted runner result.
+Draft [PR #1](https://github.com/Kappu12/AssetStudio/pull/1) provides a review
+surface without changing `main`. The prepared workflow has not yet produced a
+GitHub-hosted run for this branch, including after PR creation; local success
+must not be reported as a hosted runner result. The migration is not a complete
+replacement for all 39 original game profiles. The feature/game matrices retain
+the remaining ports and acceptance requirements.

@@ -341,6 +341,7 @@ def make_package(
         for name in (
             "docs/rust-rewrite.md", "docs/feature-parity.md",
             "docs/game-compatibility.md", "docs/review-sweeps.md", "docs/releasing.md",
+            "docs/reviews/sweep2.md", "docs/reviews/sweep2-source-ledger.json",
             "crates/assetstudio-cli/README.md",
         ):
             document = root / name

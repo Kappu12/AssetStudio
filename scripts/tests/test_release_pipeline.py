@@ -108,7 +108,9 @@ class PackageTests(Fixture):
     def test_package_contains_binaries_notices_and_verified_manifest(self) -> None:
         linked_documents = {
             "docs/feature-parity.md": "See [review sweeps](review-sweeps.md).\n",
-            "docs/review-sweeps.md": "Review evidence.\n",
+            "docs/review-sweeps.md": "See [ledger](reviews/sweep2-source-ledger.json) and [report](reviews/sweep2.md).\n",
+            "docs/reviews/sweep2.md": "Independent source review.\n",
+            "docs/reviews/sweep2-source-ledger.json": "{\"files\": []}\n",
             "crates/assetstudio-cli/README.md": "CLI usage.\n",
         }
         for name, contents in linked_documents.items():
