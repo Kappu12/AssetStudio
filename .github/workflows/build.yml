@@ -1,108 +1,138 @@
-name: Build
+name: Rust
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main, rust-rewrite]
+    tags: ['v*']
+  pull_request:
+    branches: [main, rust-rewrite]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  # An in-progress tagged release must finish its upload and publication.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
 
 jobs:
-  build-windows:
-    name: Build Windows x64
-    runs-on: windows-latest
-
+  validate:
+    name: Check ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          dotnet-version: 8.0.x
-
-      - name: Restore
-        run: dotnet restore AssetStudio.sln
-
-      - name: Publish GUI
-        run: >
-          dotnet publish AssetStudio.GUI\AssetStudio.GUI.csproj
-          -c Release
-          -f net8.0-windows
-          -r win-x64
-          --self-contained true
-          -o dist\AssetStudio-win-x64
-          /p:PublishSingleFile=true
-          /p:IncludeNativeLibrariesForSelfExtract=true
-          /p:EnableCompressionInSingleFile=true
-
-      - name: Publish CLI
-        run: >
-          dotnet publish AssetStudio.CLI\AssetStudio.CLI.csproj
-          -c Release
-          -f net8.0-windows
-          -r win-x64
-          --self-contained true
-          -o dist\AssetStudio-win-x64
-          /p:PublishSingleFile=true
-          /p:IncludeNativeLibrariesForSelfExtract=true
-          /p:EnableCompressionInSingleFile=true
-
-      - name: Verify artifact contents
-        shell: pwsh
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
         run: |
-          $publishDir = "dist\AssetStudio-win-x64"
-          $required = @(
-            "$publishDir\AssetStudio.GUI.exe",
-            "$publishDir\AssetStudio.CLI.exe",
-            "$publishDir\x64\AssetStudio.FBXNative.dll",
-            "$publishDir\x86\AssetStudio.FBXNative.dll"
-          )
-          foreach ($path in $required) {
-            if (!(Test-Path -LiteralPath $path)) {
-              throw "Missing expected artifact file: $path"
-            }
-          }
-          Get-ChildItem -LiteralPath $publishDir -Recurse | Select-Object FullName, Length
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libasound2-dev
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$(python scripts/package_release.py toolchain)" \
+            --profile minimal --component rustfmt --component clippy
+          rustc --version
+          cargo --version
+      - name: Check workflow storage and release policy
+        run: python scripts/check_workflow_policy.py
+      - name: Test packaging and release guards
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Lint all targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Build native applications
+        run: cargo build --workspace --release --locked
+      - name: Smoke-test the native applications
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          "target/release/AssetStudioCLI${suffix}" --version
+          "target/release/AssetStudioCLI${suffix}" --help
+          "target/release/AssetStudio${suffix}" --smoke-test
+      - name: Check the Windows release ZIP locally
+        if: runner.os == 'Windows'
+        run: >-
+          python scripts/package_release.py package
+          --build-dir target/release
+          --output-dir "$RUNNER_TEMP/package-check"
+          --smoke-test
 
-      - name: Prepare versioned package
+  release:
+    name: Publish tagged Windows ZIP
+    needs: validate
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the tested tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Verify the tag and install the pinned toolchain
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/package_release.py version --tag "$RELEASE_TAG"
+          rustup toolchain install "$(python scripts/package_release.py toolchain)" --profile minimal
+      # Each runner builds its own inputs. Nothing is transferred through
+      # the Actions artifact or cache services.
+      - name: Build the tested source for Windows x64
+        run: cargo build --workspace --release --locked
+      - name: Package and verify the ZIP
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python scripts/package_release.py package
+          --build-dir target/release
+          --output-dir dist
+          --tag "$RELEASE_TAG"
+          --smoke-test
+          --github-output "$GITHUB_OUTPUT"
         id: package
-        shell: pwsh
-        run: |
-          $publishDir = "dist\AssetStudio-win-x64"
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
-            $version = $env:GITHUB_REF_NAME
-          } else {
-            $version = $env:GITHUB_SHA.Substring(0, 7)
-          }
-
-          Move-Item -LiteralPath "$publishDir\AssetStudio.GUI.exe" -Destination "$publishDir\AssetStudio.GUI-$version.exe" -Force
-          Move-Item -LiteralPath "$publishDir\AssetStudio.CLI.exe" -Destination "$publishDir\AssetStudio.CLI-$version.exe" -Force
-
-          $zipPath = "dist\AssetStudio-win-x64-$version.zip"
-          Compress-Archive -Path "$publishDir\*" -DestinationPath $zipPath -Force
-
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "zip=$zipPath" >> $env:GITHUB_OUTPUT
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AssetStudio-win-x64-${{ steps.package.outputs.version }}
-          path: dist\AssetStudio-win-x64
-          if-no-files-found: error
-
-      - name: Create GitHub release
-        if: github.ref_type == 'tag'
-        shell: pwsh
+      - name: Upload directly to the release, verify, and publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${{ github.ref_name }}"
-          "${{ steps.package.outputs.zip }}"
-          --title "AssetStudio ${{ github.ref_name }}"
-          --notes "Automated Windows x64 build for ${{ github.ref_name }}."
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          PACKAGE_ZIP: ${{ steps.package.outputs.zip }}
+          PACKAGE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: >-
+          python scripts/publish_release.py
+          --tag "$RELEASE_TAG"
+          --zip "$PACKAGE_ZIP"
+          --checksum "$PACKAGE_CHECKSUM"
