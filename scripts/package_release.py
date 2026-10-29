@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import tomllib
@@ -22,8 +23,31 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 BINARIES = ("AssetStudio.exe", "AssetStudioCLI.exe")
 DOCUMENTS = ("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md")
+PACKAGE_RESOURCES = {"Keys.json": "resources/Keys.json"}
+VENDORED_LICENSES = {
+    "licenses/managed-schema-templates/LICENSE": "packaging/licenses/managed-schema-templates/LICENSE",
+}
 BACKEND_DOCUMENTS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.txt", "FSB_VORBIS_NOTICE.md")
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z")
+# Imported Windows components are supplied by Windows 10/11. Graphics and audio
+# drivers may load their own modules dynamically through these OS interfaces.
+# Application runtimes (VC++, .NET, FMOD, FBX helpers, etc.) are never allowed.
+WINDOWS_SYSTEM_IMPORTS = frozenset("""
+    advapi32.dll audioses.dll avrt.dll bcrypt.dll bcryptprimitives.dll cabinet.dll cfgmgr32.dll
+    comctl32.dll comdlg32.dll combase.dll crypt32.dll cryptbase.dll cryptnet.dll
+    cryptsp.dll d2d1.dll d3d9.dll d3d11.dll d3d12.dll d3dcompiler_47.dll dbgcore.dll dbghelp.dll
+    dcomp.dll dhcpcsvc.dll dnsapi.dll dsound.dll dwmapi.dll dwrite.dll dxcore.dll
+    dxgi.dll dxva2.dll faultrep.dll fwpuclnt.dll gdi32.dll gdiplus.dll glu32.dll
+    hid.dll imagehlp.dll imm32.dll iphlpapi.dll kernel32.dll kernelbase.dll
+    ksuser.dll mf.dll mfcore.dll mfplat.dll mfreadwrite.dll mfuuid.dll mmdevapi.dll
+    mpr.dll msacm32.dll msasn1.dll msimg32.dll msvcrt.dll mswsock.dll netapi32.dll
+    netutils.dll normaliz.dll nsi.dll ntdll.dll ole32.dll oleacc.dll oleaut32.dll
+    opengl32.dll pdh.dll powrprof.dll propsys.dll psapi.dll rasapi32.dll rpcrt4.dll
+    rsaenh.dll secur32.dll setupapi.dll shcore.dll shell32.dll shlwapi.dll sspicli.dll
+    ucrtbase.dll urlmon.dll user32.dll userenv.dll usp10.dll uxtheme.dll version.dll
+    wevtapi.dll win32u.dll windowscodecs.dll winhttp.dll wininet.dll winmm.dll
+    winspool.drv wintrust.dll winusb.dll wldap32.dll ws2_32.dll wtsapi32.dll
+""".split())
 
 
 def workspace_version(root: Path = ROOT) -> str:
@@ -134,17 +158,111 @@ def copy_dependency_licenses(metadata: dict, stage: Path) -> list[dict]:
 def check_executable(path: Path) -> None:
     require_file(path)
     with path.open("rb") as source:
-        header = source.read(64)
+        size = path.stat().st_size
+        if size < 64:
+            raise ValueError(f"Not a Windows executable: {path}")
+
+        def read_at(offset: int, length: int) -> bytes:
+            if offset < 0 or length < 0 or offset + length > size:
+                raise ValueError(f"Truncated PE range in {path}")
+            source.seek(offset)
+            value = source.read(length)
+            if len(value) != length:
+                raise ValueError(f"Truncated PE input: {path}")
+            return value
+
+        header = read_at(0, 64)
         if len(header) < 64 or header[:2] != b"MZ":
             raise ValueError(f"Not a Windows executable: {path}")
         pe_offset = int.from_bytes(header[60:64], "little")
-        if not 64 <= pe_offset <= path.stat().st_size - 6:
+        if not 64 <= pe_offset <= size - 24:
             raise ValueError(f"Invalid PE header offset: {path}")
-        source.seek(pe_offset)
-        if source.read(4) != b"PE\0\0":
+        coff = read_at(pe_offset, 24)
+        if coff[:4] != b"PE\0\0":
             raise ValueError(f"Missing PE signature: {path}")
-        if source.read(2) != b"\x64\x86":
+        if coff[4:6] != b"\x64\x86":
             raise ValueError(f"Not a Windows x64 executable: {path}")
+        sections = int.from_bytes(coff[6:8], "little")
+        optional_size = int.from_bytes(coff[20:22], "little")
+        if not 1 <= sections <= 96 or not 112 <= optional_size <= 4096:
+            raise ValueError(f"Invalid PE section/optional-header count: {path}")
+        optional = read_at(pe_offset + 24, optional_size)
+        if optional[:2] != b"\x0b\x02":
+            raise ValueError(f"Expected a PE32+ Windows x64 executable: {path}")
+        header_size = struct.unpack_from("<I", optional, 60)[0]
+        directory_count = struct.unpack_from("<I", optional, 108)[0]
+        if not 14 <= directory_count <= 16 or optional_size < 112 + directory_count * 8:
+            raise ValueError(f"PE import directories are missing or truncated: {path}")
+        table_offset = pe_offset + 24 + optional_size
+        if not table_offset + sections * 40 <= header_size <= size:
+            raise ValueError(f"Invalid PE header size: {path}")
+        ranges = []
+        for index in range(sections):
+            section = read_at(table_offset + index * 40, 40)
+            virtual_size, virtual_start, raw_size, raw_start = struct.unpack_from("<IIII", section, 8)
+            if raw_size and (raw_start < header_size or raw_start + raw_size > size):
+                raise ValueError(f"PE section leaves its input file: {path}")
+            virtual_end = virtual_start + max(virtual_size, raw_size)
+            if virtual_end > 0x1_0000_0000:
+                raise ValueError(f"PE virtual section range overflows: {path}")
+            if virtual_start < header_size or any(virtual_start < end and start < virtual_end for start, end, _, _ in ranges):
+                raise ValueError(f"PE virtual sections overlap: {path}")
+            ranges.append((virtual_start, virtual_end, raw_start, raw_size))
+
+        def read_rva(address: int, length: int) -> bytes:
+            if address < header_size and address + length <= header_size:
+                return read_at(address, length)
+            for start, end, raw_start, raw_size in ranges:
+                if start <= address < end and address - start + length <= raw_size:
+                    return read_at(raw_start + address - start, length)
+            raise ValueError(f"Unmapped or truncated PE import address in {path}")
+
+        def dll_name(address: int) -> str:
+            value = bytearray()
+            for index in range(256):
+                byte = read_rva(address + index, 1)[0]
+                if not byte:
+                    try:
+                        name = value.decode("ascii")
+                    except UnicodeDecodeError as error:
+                        raise ValueError(f"Non-ASCII PE import name in {path}") from error
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+                        raise ValueError(f"Unsafe PE import name in {path}")
+                    return name
+                value.append(byte)
+            raise ValueError(f"PE import name exceeds 255 bytes: {path}")
+
+        imports = set()
+        for directory, record_size in ((1, 20), (13, 32)):
+            address, length = struct.unpack_from("<II", optional, 112 + directory * 8)
+            if address == 0 and length == 0:
+                continue
+            if not address or length < record_size:
+                raise ValueError(f"Invalid PE import directory: {path}")
+            terminated = False
+            for index in range(min(length // record_size, 513)):
+                descriptor = read_rva(address + index * record_size, record_size)
+                if not any(descriptor):
+                    terminated = True
+                    break
+                if index == 512:
+                    raise ValueError(f"PE imports exceed 512 DLLs: {path}")
+                if directory == 1:
+                    name_address = struct.unpack_from("<I", descriptor, 12)[0]
+                else:
+                    attributes, name_address = struct.unpack_from("<II", descriptor)
+                    if attributes != 1:
+                        raise ValueError(f"Unsupported PE delayed-import address format: {path}")
+                if name_address == 0:
+                    raise ValueError(f"PE import has no DLL name: {path}")
+                imports.add(dll_name(name_address))
+            if not terminated:
+                raise ValueError(f"PE import directory has no terminator: {path}")
+        for name in sorted(imports):
+            lower = name.lower()
+            api_set = re.fullmatch(r"(?:api|ext)-ms-win-[a-z0-9-]+\.dll", lower)
+            if lower not in WINDOWS_SYSTEM_IMPORTS and not api_set:
+                raise ValueError(f"Portable Windows executable imports a non-system runtime DLL: {name} in {path}; MSVC builds require +crt-static")
 
 
 def inspect_zip(path: Path, expected_version: str) -> None:
@@ -160,6 +278,8 @@ def inspect_zip(path: Path, expected_version: str) -> None:
             if not item.parts or archive.getinfo(name).is_dir():
                 raise ValueError("ZIP must contain files only")
         required = set(BINARIES + DOCUMENTS + ("package-manifest.json",))
+        required.update(PACKAGE_RESOURCES)
+        required.update(VENDORED_LICENSES)
         required.update("licenses/unity-rs-core/" + name for name in BACKEND_DOCUMENTS)
         if not required.issubset(names):
             raise ValueError(f"ZIP is missing required files: {sorted(required - set(names))}")
@@ -193,6 +313,8 @@ def make_package(
         check_executable(build_dir / name)
     for name in DOCUMENTS:
         require_file(root / name)
+    for source in (*PACKAGE_RESOURCES.values(), *VENDORED_LICENSES.values()):
+        require_file(root / source)
     metadata = metadata if metadata is not None else cargo_metadata(root)
     backend = backend_directory(metadata)
     for name in BACKEND_DOCUMENTS:
@@ -206,11 +328,17 @@ def make_package(
             shutil.copy2(build_dir / name, stage / name)
         for name in DOCUMENTS:
             shutil.copy2(root / name, stage / name)
+        for name, source in PACKAGE_RESOURCES.items():
+            shutil.copy2(root / source, stage / name)
+        for name, source in VENDORED_LICENSES.items():
+            target = stage / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / source, target)
         licenses = stage / "licenses" / "unity-rs-core"
         licenses.mkdir(parents=True)
         for name in BACKEND_DOCUMENTS:
             shutil.copy2(backend / name, licenses / name)
-        for name in ("rust-rewrite.md", "compatibility.md", "releasing.md"):
+        for name in ("rust-rewrite.md", "compatibility.md", "game-compatibility.md", "releasing.md"):
             document = root / "docs" / name
             if document.is_file():
                 require_file(document)
@@ -236,7 +364,10 @@ def make_package(
             subprocess.run([str((stage / "AssetStudio.exe").resolve()), "--smoke-test"],
                            capture_output=True, text=True, encoding="utf-8", check=True, timeout=30)
         temporary_zip = stage / "package.zip"
-        with zipfile.ZipFile(temporary_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        # Cargo registry archives normalize source mtimes to dates that can
+        # precede ZIP's 1980 minimum. Preserve legal bytes while clamping only
+        # the ZIP metadata timestamp to its representable range.
+        with zipfile.ZipFile(temporary_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, strict_timestamps=False) as archive:
             for path in sorted(stage.rglob("*")):
                 if path.is_file() and path != temporary_zip:
                     archive.write(path, path.relative_to(stage).as_posix())

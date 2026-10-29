@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# The portable ZIP must start on a clean Windows installation without a
+# separately installed Visual C++ redistributable.
+rustflags = ["-C", "target-feature=+crt-static"]

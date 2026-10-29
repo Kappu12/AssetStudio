@@ -7,6 +7,8 @@ bytes so the real publisher must complete the same download/hash verification.
 from __future__ import annotations
 
 import json
+import os
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -17,16 +19,41 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from check_workflow_policy import ROOT as SOURCE_ROOT, check_policy
-from package_release import BACKEND_DOCUMENTS, BINARIES, DOCUMENTS, inspect_zip, make_package, sha256, verify_tag, workspace_version
+from package_release import BACKEND_DOCUMENTS, BINARIES, DOCUMENTS, PACKAGE_RESOURCES, VENDORED_LICENSES, inspect_zip, make_package, sha256, verify_tag, workspace_version
 from publish_release import guard_tag_push, publish
 
 
-def fake_pe() -> bytes:
-    data = bytearray(96)
+def fake_pe(imports: tuple[str, ...] = ("KERNEL32.dll", "USER32.dll"), delayed: tuple[str, ...] = ()) -> bytes:
+    """A PE32+ header and mapped .rdata import directory, without executable code."""
+    data = bytearray(2048)
     data[:2] = b"MZ"
     data[60:64] = (64).to_bytes(4, "little")
     data[64:68] = b"PE\0\0"
-    data[68:70] = b"\x64\x86"  # IMAGE_FILE_MACHINE_AMD64
+    struct.pack_into("<HH", data, 68, 0x8664, 1)  # AMD64, one section.
+    struct.pack_into("<H", data, 84, 240)
+    optional = 88
+    struct.pack_into("<H", data, optional, 0x20B)  # PE32+.
+    struct.pack_into("<I", data, optional + 60, 512)  # SizeOfHeaders.
+    struct.pack_into("<I", data, optional + 108, 16)
+    section = optional + 240
+    data[section:section + 8] = b".rdata\0\0"
+    struct.pack_into("<IIII", data, section + 8, 1536, 0x1000, 1536, 512)
+    string_offset = 1024
+    for directory, names, table_offset, record_size in ((1, imports, 512, 20), (13, delayed, 768, 32)):
+        if not names:
+            continue
+        struct.pack_into("<II", data, optional + 112 + directory * 8, 0x1000 + table_offset - 512, (len(names) + 1) * record_size)
+        for index, name in enumerate(names):
+            record = table_offset + index * record_size
+            address = 0x1000 + string_offset - 512
+            if directory == 1:
+                struct.pack_into("<I", data, record + 12, address)
+                struct.pack_into("<I", data, record + 16, 0x1400)
+            else:
+                struct.pack_into("<II", data, record, 1, address)
+            encoded = name.encode("ascii") + b"\0"
+            data[string_offset:string_offset + len(encoded)] = encoded
+            string_offset += len(encoded)
     return bytes(data)
 
 
@@ -49,6 +76,14 @@ class Fixture(unittest.TestCase):
             (self.build / name).write_bytes(fake_pe())
         for name in DOCUMENTS:
             (self.root / name).write_text(f"Fixture document {name}\n", encoding="utf-8")
+        for source in PACKAGE_RESOURCES.values():
+            path = self.root / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("[]\n", encoding="utf-8")
+        for source in VENDORED_LICENSES.values():
+            path = self.root / source
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("Fixture vendored source MIT notice\n", encoding="utf-8")
         for name in BACKEND_DOCUMENTS:
             (self.backend / name).write_text(f"Backend legal document {name}\n", encoding="utf-8")
         self.metadata = {"packages": [
@@ -77,6 +112,8 @@ class PackageTests(Fixture):
         with zipfile.ZipFile(archive) as package:
             names = set(package.namelist())
             self.assertTrue(set(BINARIES + DOCUMENTS).issubset(names))
+            self.assertEqual(package.read("Keys.json"), b"[]\n")
+            self.assertEqual(package.read("licenses/managed-schema-templates/LICENSE"), b"Fixture vendored source MIT notice\n")
             inventory = json.loads(package.read("dependency-inventory.json"))
             self.assertEqual([p["name"] for p in inventory], ["fixture-codec", "unity-rs-core"])
             self.assertEqual(package.read(inventory[0]["license_files"][0]), b"Fixture codec MIT notice\n")
@@ -100,10 +137,59 @@ class PackageTests(Fixture):
         with self.assertRaisesRegex(ValueError, "x64 executable"):
             self.package()
 
+    def test_windows_os_and_api_set_imports_are_allowed(self) -> None:
+        (self.build / "AssetStudio.exe").write_bytes(fake_pe(
+            ("KERNEL32.dll", "api-ms-win-core-file-l1-2-0.dll", "OPENGL32.dll"),
+            ("MMDevAPI.dll",),
+        ))
+        self.package()
+
+    def test_external_runtime_imports_are_rejected_in_either_import_table(self) -> None:
+        for name, delayed in (("VCRUNTIME140.dll", False), ("MSVCP140.dll", True), ("AssetStudio.FBXNative.dll", True), ("libgcc_s_seh-1.dll", False)):
+            with self.subTest(name=name):
+                (self.build / "AssetStudio.exe").write_bytes(fake_pe(
+                    ("KERNEL32.dll",) if delayed else (name,), (name,) if delayed else (),
+                ))
+                with self.assertRaisesRegex(ValueError, "non-system runtime DLL"):
+                    self.package()
+
+    def test_import_directories_cannot_point_outside_mapped_pe_sections(self) -> None:
+        data = bytearray(fake_pe())
+        struct.pack_into("<I", data, 512 + 12, 0xFFFF_FF00)
+        (self.build / "AssetStudio.exe").write_bytes(data)
+        with self.assertRaisesRegex(ValueError, "import address"):
+            self.package()
+
+    def test_unterminated_import_directories_are_rejected(self) -> None:
+        data = bytearray(fake_pe(("KERNEL32.dll",)))
+        struct.pack_into("<I", data, 88 + 112 + 8 + 4, 20)
+        (self.build / "AssetStudio.exe").write_bytes(data)
+        with self.assertRaisesRegex(ValueError, "no terminator"):
+            self.package()
+
     def test_missing_backend_license_prevents_package(self) -> None:
         (self.backend / "LICENSE").unlink()
         with self.assertRaisesRegex(ValueError, "package input"):
             self.package()
+
+    def test_missing_bundled_key_registry_prevents_package(self) -> None:
+        (self.root / PACKAGE_RESOURCES["Keys.json"]).unlink()
+        with self.assertRaisesRegex(ValueError, "package input"):
+            self.package()
+
+    def test_missing_vendored_source_notice_prevents_package(self) -> None:
+        (self.root / next(iter(VENDORED_LICENSES.values()))).unlink()
+        with self.assertRaisesRegex(ValueError, "package input"):
+            self.package()
+
+    def test_registry_licenses_with_normalized_pre_1980_timestamps_package(self) -> None:
+        os.utime(self.codec / "LICENSE-MIT", (0, 0))
+        archive, _ = self.package()
+        with zipfile.ZipFile(archive) as package:
+            inventory = json.loads(package.read("dependency-inventory.json"))
+            license_name = inventory[0]["license_files"][0]
+            self.assertEqual(package.getinfo(license_name).date_time[:3], (1980, 1, 1))
+            self.assertEqual(package.read(license_name), b"Fixture codec MIT notice\n")
 
     def test_tag_mismatch_fails_before_staging(self) -> None:
         with self.assertRaisesRegex(ValueError, "must equal workspace"):

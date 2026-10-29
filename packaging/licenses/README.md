@@ -15,6 +15,11 @@ package-provided LICENSE/COPYING/NOTICE files are retained for all other
 dependencies. Each ZIP's dependency inventory records exactly which legal
 files and fallback sources it includes.
 
+`managed-schema-templates/LICENSE` retains the complete MIT notice for the
+vendored Unity type-template policy helpers. It is packaged separately from
+Cargo dependencies, because those copied source portions use the native MIT
+metadata reader instead of the upstream generator's parser dependency graph.
+
 If a dependency update changes a recorded version, audit its legal inputs and
 update the manifest. The packager refuses to ship a dependency with no legal
 files instead of silently dropping its redistribution notices.
