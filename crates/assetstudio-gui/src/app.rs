@@ -254,7 +254,7 @@ pub struct StudioApp {
     source_options: LoadOptions,
     generation: u64,
     assets: Arc<Vec<AssetRecord>>,
-    by_key: HashMap<AssetKey, usize>,
+    by_key: Arc<HashMap<AssetKey, usize>>,
     classes: BTreeMap<String, usize>,
     row_index: Arc<RowIndex>,
     type_search: String,
@@ -318,7 +318,7 @@ impl StudioApp {
             source_options: LoadOptions::default(),
             generation: 0,
             assets: Arc::new(Vec::new()),
-            by_key: HashMap::new(),
+            by_key: Arc::new(HashMap::new()),
             classes: BTreeMap::new(),
             row_index: Arc::new(RowIndex::default()),
             type_search: String::new(),
@@ -1178,7 +1178,7 @@ impl StudioApp {
                 auxiliary_inputs.push(folder);
             }
             let catalog =
-                Catalog::prepare_with_progress(session.shared_assets(), |stage, done, total| {
+                Catalog::prepare_session_with_progress(&session, |stage, done, total| {
                     progress.update(stage, done, total);
                 })?;
             Ok(TaskPayload::Loaded {

@@ -30,7 +30,7 @@ pub(crate) const MAX_EXPORT_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub struct Session {
     pub(crate) studio: Studio,
     assets: Arc<Vec<AssetRecord>>,
-    by_key: HashMap<AssetKey, usize>,
+    by_key: Arc<HashMap<AssetKey, usize>>,
     diagnostics: Vec<String>,
     warnings: Vec<String>,
     pub(crate) xor_key: u8,
@@ -279,12 +279,21 @@ impl Session {
                 file_index: object.file_index(),
                 path_id: object.path_id(),
             };
+            let metadata = object.metadata();
             let record = AssetRecord {
                 key,
                 class_id: object.class_id(),
                 class_name: class_name(object.class_id()).to_owned(),
-                name: bounded_name(object.name().unwrap_or("")),
-                container: bounded_name(object.container().unwrap_or("")),
+                name: bounded_name(
+                    metadata
+                        .and_then(|value| value.name.as_deref())
+                        .unwrap_or(""),
+                ),
+                container: bounded_name(
+                    metadata
+                        .and_then(|value| value.container.as_deref())
+                        .unwrap_or(""),
+                ),
                 source: bounded_name(object.source_path()),
                 size: object.byte_size(),
             };
@@ -321,7 +330,7 @@ impl Session {
         let mut session = Self {
             studio,
             assets: Arc::new(assets),
-            by_key,
+            by_key: Arc::new(by_key),
             diagnostics,
             warnings: Vec::new(),
             xor_key: options.xor_key,
@@ -349,6 +358,11 @@ impl Session {
     /// write so an existing snapshot remains internally consistent.
     pub fn shared_assets(&self) -> Arc<Vec<AssetRecord>> {
         self.assets.clone()
+    }
+
+    /// Shares the validated immutable object identity lookup with the browser.
+    pub fn shared_asset_lookup(&self) -> Arc<HashMap<AssetKey, usize>> {
+        self.by_key.clone()
     }
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -915,17 +929,16 @@ fn append_extraction(
 }
 
 fn bounded_name(value: &str) -> String {
+    if value.len() <= 4096 {
+        return value.to_owned();
+    }
     let end = value
         .char_indices()
         .map(|(index, _)| index)
         .take_while(|&index| index <= 4096)
         .last()
         .unwrap_or(0);
-    if value.len() <= 4096 {
-        value.to_owned()
-    } else {
-        value[..end].to_owned()
-    }
+    value[..end].to_owned()
 }
 
 pub(crate) fn backend_options(options: &LoadOptions) -> Result<AssetLoadOptions> {

@@ -25,7 +25,7 @@ pub struct Filters {
 pub struct Catalog {
     pub assets: Arc<Vec<AssetRecord>>,
     pub classes: BTreeMap<String, usize>,
-    pub by_key: HashMap<AssetKey, usize>,
+    pub by_key: Arc<HashMap<AssetKey, usize>>,
     pub rows: Arc<RowIndex>,
 }
 
@@ -159,22 +159,44 @@ impl Catalog {
         Self::prepare_with_progress(Arc::new(records.to_vec()), |_, _, _| {})
     }
 
+    #[cfg(test)]
     pub fn prepare_with_progress(
         assets: Arc<Vec<AssetRecord>>,
-        mut progress: impl FnMut(&'static str, usize, Option<usize>),
+        progress: impl FnMut(&'static str, usize, Option<usize>),
     ) -> Result<Self, String> {
         let mut by_key = HashMap::new();
         by_key
             .try_reserve(assets.len())
             .map_err(|error| error.to_string())?;
+        for (index, record) in assets.iter().enumerate() {
+            if by_key.insert(record.key, index).is_some() {
+                return Err("The asset catalog contains duplicate object identities.".to_owned());
+            }
+        }
+        Self::prepare_parts(assets, Arc::new(by_key), progress)
+    }
+
+    pub fn prepare_session_with_progress(
+        session: &assetstudio_core::Session,
+        progress: impl FnMut(&'static str, usize, Option<usize>),
+    ) -> Result<Self, String> {
+        Self::prepare_parts(
+            session.shared_assets(),
+            session.shared_asset_lookup(),
+            progress,
+        )
+    }
+
+    fn prepare_parts(
+        assets: Arc<Vec<AssetRecord>>,
+        by_key: Arc<HashMap<AssetKey, usize>>,
+        mut progress: impl FnMut(&'static str, usize, Option<usize>),
+    ) -> Result<Self, String> {
         let mut classes = BTreeMap::<String, usize>::new();
         progress("Preparing browser", 0, Some(assets.len()));
         for (index, record) in assets.iter().enumerate() {
             if index % 4096 == 0 {
                 progress("Preparing browser", index, Some(assets.len()));
-            }
-            if by_key.insert(record.key, index).is_some() {
-                return Err("The asset catalog contains duplicate object identities.".to_owned());
             }
             if let Some(count) = classes.get_mut(&record.class_name) {
                 *count += 1;
@@ -773,12 +795,21 @@ mod tests {
             std::env::var_os("ASSETSTUDIO_PERF_INPUT").expect("set ASSETSTUDIO_PERF_INPUT"),
         );
         let now = Instant::now();
-        let session = assetstudio_core::Session::open(
+        let phase = Arc::new(std::sync::Mutex::new(("Starting", Instant::now())));
+        let observer: assetstudio_core::ProgressObserver = Arc::new(move |update| {
+            let mut phase = phase.lock().unwrap();
+            if phase.0 != update.stage {
+                println!("Phase {}: {:?}", phase.0, phase.1.elapsed());
+                *phase = (update.stage, Instant::now());
+            }
+        });
+        let session = assetstudio_core::Session::open_with_progress(
             &path,
             &assetstudio_core::LoadOptions {
                 maximum_assets: 10_000_000,
                 ..Default::default()
             },
+            Some(observer),
         )
         .unwrap();
         println!(
@@ -787,8 +818,7 @@ mod tests {
             now.elapsed()
         );
         let now = Instant::now();
-        let catalog =
-            Catalog::prepare_with_progress(session.shared_assets(), |_, _, _| {}).unwrap();
+        let catalog = Catalog::prepare_session_with_progress(&session, |_, _, _| {}).unwrap();
         println!("Prepare browser indexes: {:?}", now.elapsed());
         for classes in [
             BTreeSet::new(),

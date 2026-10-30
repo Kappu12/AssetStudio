@@ -893,21 +893,25 @@ impl StudioObject<'_> {
         self.info().byte_size
     }
 
-    /// Returns a resolved name when the loader could safely parse one.
+    /// Returns resolved display-name and container metadata with one lookup.
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
+    pub fn metadata(&self) -> Option<&crate::loader::LoadedObjectMetadata> {
         self.studio
             .collection
             .object_metadata(self.file_index, self.path_id())
+    }
+
+    /// Returns a resolved name when the loader could safely parse one.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.metadata()
             .and_then(|metadata| metadata.name.as_deref())
     }
 
     /// Returns the resolved AssetBundle/ResourceManager container path.
     #[must_use]
     pub fn container(&self) -> Option<&str> {
-        self.studio
-            .collection
-            .object_metadata(self.file_index, self.path_id())
+        self.metadata()
             .and_then(|metadata| metadata.container.as_deref())
     }
 
