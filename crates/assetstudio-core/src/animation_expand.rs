@@ -114,6 +114,10 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
         && data.dense.curve_count == 0
         && data.dense.samples.count == 0
         && data.constant.values.count == 0
+        && !data
+            .mhy_acl
+            .as_ref()
+            .is_some_and(|acl| acl.tracks.byte_length != 0)
     {
         return Ok(());
     }
@@ -153,10 +157,29 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
         "explicit animation exceeds its shared key limit"
     );
     samples.count = explicit_keys;
+    let decoded_mhy = data
+        .mhy_acl
+        .as_ref()
+        .filter(|acl| acl.tracks.byte_length != 0)
+        .map(|acl| {
+            acl.decode(unity_rs_core::acl::AclNativeDecodeLimits {
+                compressed: unity_rs_core::acl::AclCompressedTracksLimits {
+                    maximum_decompressed_values: MAX_SCALAR_KEYS as u64,
+                    ..Default::default()
+                },
+                maximum_materialized_bytes: 64 * 1024 * 1024,
+            })
+        })
+        .transpose()?;
+    let acl_count = decoded_mhy
+        .as_ref()
+        .map_or(0, |acl| acl.following_curve_offset as usize);
     let stream_count = usize::try_from(data.streamed.curve_count)?;
     let dense_count = usize::try_from(data.dense.curve_count)?;
-    let dense_start = stream_count;
-    let constant_start = stream_count
+    let dense_start = acl_count
+        .checked_add(stream_count)
+        .context("animation curve offset overflow")?;
+    let constant_start = dense_start
         .checked_add(dense_count)
         .context("animation curve offset overflow")?;
     let end = constant_start
@@ -166,8 +189,26 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
         end == total,
         "compressed muscle sample count disagrees with its bindings"
     );
+    if let Some(acl) = decoded_mhy {
+        for (frame, &time) in acl.times.iter().enumerate() {
+            for (column, &value) in acl.values[frame * acl_count..(frame + 1) * acl_count]
+                .iter()
+                .enumerate()
+            {
+                samples.push(
+                    column,
+                    ScalarKey {
+                        time,
+                        value,
+                        incoming: 0.0,
+                        outgoing: 0.0,
+                    },
+                )?;
+            }
+        }
+    }
     let words = data.streamed.data.read_values(MAX_STREAM_WORDS)?;
-    streamed(&words, stream_count, &mut samples)?;
+    streamed_at(&words, stream_count, acl_count, &mut samples)?;
     let dense = &data.dense;
     let dense_size = dense
         .frame_count
@@ -289,7 +330,17 @@ struct PolynomialKey {
     coeff: [f32; 3],
 }
 
+#[cfg(test)]
 fn streamed(words: &[u32], curve_count: usize, output: &mut Samples) -> Result<()> {
+    streamed_at(words, curve_count, 0, output)
+}
+
+fn streamed_at(
+    words: &[u32],
+    curve_count: usize,
+    binding_offset: usize,
+    output: &mut Samples,
+) -> Result<()> {
     ensure!(
         words.len() <= MAX_STREAM_WORDS,
         "streamed animation exceeds its word limit"
@@ -390,7 +441,9 @@ fn streamed(words: &[u32], curve_count: usize, output: &mut Samples) -> Result<(
                     }
                 };
                 output.push(
-                    index,
+                    binding_offset
+                        .checked_add(index)
+                        .context("streamed binding index overflow")?,
                     ScalarKey {
                         time,
                         value,

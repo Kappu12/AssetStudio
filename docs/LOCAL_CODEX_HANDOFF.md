@@ -1,3 +1,28 @@
+# Latest local continuation — 2026-10-30 Windows
+
+The old handoff below is historical. Continue on rust-rewrite; no push or release
+was requested. The local Windows fixes are committed as 550e0e7.
+
+The ACL 1.1 decoder is now registered, tested, and integrated for BH3Pre. The
+profile has native keyed-header/mr0k/container, renderer and non-SR animation
+paths. Three complete serialized fixtures verify original-DLL samples, emitted
+`.anim` vectors, following dense/constant binding offsets and model tracks.
+Modern root hash-zero tracks now resolve to the animation owner.
+
+A fresh optimized Windows/MSVC workspace build and GUI/CLI smoke tests passed.
+Windows checks: 1,005 Rust tests passed, 14 optional external checks ignored;
+35 Python tests passed, two symlink tests unavailable; strict Clippy and policy
+checks passed. `--max-assets` / GUI catalog settings allow an explicit capacity
+up to ten million. The supplied `A:\Blender\Rust_Assets` has 168 files totaling
+53,558,105,139 bytes and needs an index of 6,591,934 entries. Full-corpus
+acceptance is in progress with the new limit; outputs stay under target/acceptance.
+
+29/39 profiles are now accepted. Remaining rejected profiles: GI, GI_Pack,
+GI_CB1, GI_CB2, GI_CB3, GI_CB3Pre, BH3, ZZZ_CB1, SR_CB2, SR. Other unresolved
+limits remain in feature-parity.md. Never describe these changes as full parity.
+
+---
+
 # Local Codex handoff
 
 Continue on **rust-rewrite**. Do not push main, create a tag, or publish a

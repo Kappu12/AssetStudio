@@ -25,8 +25,8 @@ All accepted wrapper profiles expose a visible advisory through
 These advisories do not count as load failures or change a successful CLI exit
 status. Input files are never modified.
 
-The current selector accepts **28 of the 39** baseline profiles. Eleven remain
-explicit errors: GI/GI_Pack/GI_CB1/GI_CB2/GI_CB3/GI_CB3Pre, BH3/BH3Pre,
+The current selector accepts **29 of the 39** baseline profiles. Ten remain
+explicit errors: GI/GI_Pack/GI_CB1/GI_CB2/GI_CB3/GI_CB3Pre, BH3,
 ZZZ_CB1 and SR_CB2/SR. Acceptance of a profile covers the
 implemented container and field variants below, not every historical layout or
 its opaque animation codec.
@@ -42,7 +42,7 @@ its opaque animation codec.
 | GI_CB3 | Not implemented | BLK and custom serialized/object layouts |
 | GI_CB3Pre | Not implemented | BLK/mhy0 and custom serialized/object layouts |
 | BH3 | Not implemented | Encrypted bundle headers, mr0k blocks, custom renderers/meshes/animations |
-| BH3Pre | Not implemented | Encrypted bundle headers, mr0k blocks, custom renderers/animations |
+| BH3Pre | Seed-keyed headers, pack-key mr0k blocks, concatenated bundles, half-resolution renderer flag and resident MHY ACL 1.1 variable-QVV animation implemented | Original mr0k/PRNG oracles, constructed container/renderer fixtures, and complete serialized MHY clips checked against original DLL sample values; live game not tested |
 | BH3PrePre | Historical encrypted header and pack-key mr0k blocks; player-layout override implemented | Original C# byte oracles and synthetic Session fixtures; other BH3 versions remain separate |
 | ZZZ_CB1 | Not implemented | mr0k compression and custom serialized/animation layouts |
 | SR_CB2 | Not implemented | mr0k compression, alignment and custom serialized/animation layouts |
@@ -154,3 +154,14 @@ The wrapper algorithms and game constants were transcribed from
 `AssetStudio/GameManager.cs` at the baseline commit. The repository MIT license
 and upstream author notices apply to those translated portions. Generic Unity
 parsing remains attributed to the separately pinned MIT `unity-rs-core` backend.
+
+## Native MHY animation continuation
+
+The registered ACL 1.1 variable-QVV decoder now participates in normal workspace
+tests. BH3Pre reads the original non-SR field order and prepends the decoded
+R4/T3/S3 binding stream before ordinary streamed, dense and constant curves.
+Three complete format-22 serialized fixtures check every native sample against
+the original x64 acl.dll, every emitted `.anim` vector sample, following-curve
+offsets, hierarchy paths, and model translation/scale tracks. Empty payloads
+cannot declare curves, and mismatched binding counts fail explicitly.
+Full/fixed selectors, SR and database codecs remain separate contracts.

@@ -19,8 +19,6 @@ use unity_rs_core::{
 
 use crate::{AssetKey, AssetRecord, LoadOptions, OperationReport, Preview, SceneNode, class_name};
 
-const MAX_CATALOG_OBJECTS: usize = 1_000_000;
-const MAX_CATALOG_TEXT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_PREVIEW_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PREVIEW_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_AUDIO_BYTES: u64 = 32 * 1024 * 1024;
@@ -38,6 +36,8 @@ pub struct Session {
     pub(crate) mono_schemas: unity_rs_core::mono_schema::MonoBehaviourSchemaRegistry,
     input_paths: Vec<PathBuf>,
     protected_sources: crate::source_protection::SourceProtection,
+    maximum_assets: usize,
+    maximum_catalog_text_bytes: usize,
 }
 
 impl Session {
@@ -137,7 +137,8 @@ impl Session {
                 objects = objects
                     .checked_add(file.file.objects.len())
                     .context("multi-file object count overflow")?;
-                if objects > MAX_CATALOG_OBJECTS || expanded > load.limits.maximum_expanded_bytes {
+                if objects > options.maximum_assets || expanded > load.limits.maximum_expanded_bytes
+                {
                     bail!("multi-file input exceeds the shared object/expansion limits");
                 }
                 parts.serialized_files.try_reserve(1)?;
@@ -169,7 +170,7 @@ impl Session {
         }
         let mut collection = AssetCollection::from_parts(parts);
         collection.resolve_object_metadata(load.limits)?;
-        let mut session = Self::from_studio(Studio::from_collection(collection), options.xor_key)?;
+        let mut session = Self::from_studio(Studio::from_collection(collection), options)?;
         for path in &canonical_inputs {
             session.protected_sources.include_input(path)?;
         }
@@ -194,7 +195,7 @@ impl Session {
             None => Studio::open_with_options(input, load),
         }
         .with_context(|| format!("open Unity input {input:?}"))?;
-        let mut session = Self::from_studio(studio, options.xor_key)?;
+        let mut session = Self::from_studio(studio, options)?;
         session.protected_sources.include_input(input)?;
         session.input_paths = vec![std::fs::canonicalize(input)?];
         session.diagnostics.extend(preprocess_diagnostics);
@@ -218,17 +219,21 @@ impl Session {
         }
         Self::from_studio(
             Studio::open_regions_with_options(inputs, backend_options(options)?)?,
-            options.xor_key,
+            options,
         )
     }
 
-    fn from_studio(studio: Studio, xor_key: u8) -> Result<Self> {
+    fn from_studio(studio: Studio, options: &LoadOptions) -> Result<Self> {
         if studio.object_count() == 0 {
             bail!("input contains no readable Unity serialized objects");
         }
-        if studio.object_count() > MAX_CATALOG_OBJECTS {
-            bail!("input exceeds the {MAX_CATALOG_OBJECTS} object catalog limit");
+        if studio.object_count() > options.maximum_assets {
+            bail!(
+                "input exceeds the {} object catalog limit; select fewer inputs or raise the asset limit",
+                options.maximum_assets
+            );
         }
+        let maximum_catalog_text_bytes = catalog_text_budget(options.maximum_assets);
         let mut assets = Vec::new();
         assets.try_reserve_exact(studio.object_count())?;
         let mut by_key = HashMap::new();
@@ -258,8 +263,8 @@ impl Session {
                     .checked_add(value.len())
                     .context("catalog metadata length overflow")?;
             }
-            if text_bytes > MAX_CATALOG_TEXT_BYTES {
-                bail!("catalog metadata exceeds 256 MiB");
+            if text_bytes > maximum_catalog_text_bytes {
+                bail!("catalog metadata exceeds its {maximum_catalog_text_bytes} byte limit");
             }
             if by_key.insert(key, assets.len()).is_some() {
                 bail!("duplicate object identity {key:?}");
@@ -277,10 +282,12 @@ impl Session {
             by_key,
             diagnostics,
             warnings: Vec::new(),
-            xor_key,
+            xor_key: options.xor_key,
             mono_schemas: unity_rs_core::mono_schema::MonoBehaviourSchemaRegistry::default(),
             input_paths: Vec::new(),
             protected_sources: crate::source_protection::SourceProtection::default(),
+            maximum_assets: options.maximum_assets,
+            maximum_catalog_text_bytes,
         };
         for file in session.studio.collection().serialized_files() {
             session.protected_sources.include_label(&file.path)?;
@@ -365,7 +372,7 @@ impl Session {
                 retained = retained
                     .checked_add(name.len())
                     .context("IndexObject name size overflow")?;
-                if retained > MAX_CATALOG_TEXT_BYTES {
+                if retained > self.maximum_catalog_text_bytes {
                     bail!("IndexObject metadata exceeds catalog byte limit");
                 }
                 self.assets[index].name = name;
@@ -412,7 +419,7 @@ impl Session {
                     .context("metadata accounting underflow")?
                     .checked_add(container.len() + name.len())
                     .context("metadata accounting overflow")?;
-                if retained > MAX_CATALOG_TEXT_BYTES {
+                if retained > self.maximum_catalog_text_bytes {
                     bail!("IndexObject metadata exceeds catalog byte limit");
                 }
                 self.assets[index].container = container;
@@ -434,7 +441,7 @@ impl Session {
             .with_context(|| format!("unknown asset {key:?}"))
     }
     pub(crate) fn selected(&self, keys: &[AssetKey]) -> Result<Vec<&AssetRecord>> {
-        if keys.len() > MAX_CATALOG_OBJECTS {
+        if keys.len() > self.maximum_assets {
             bail!("selection exceeds the object limit");
         }
         let mut seen = HashSet::new();
@@ -890,13 +897,35 @@ pub(crate) fn backend_options(options: &LoadOptions) -> Result<AssetLoadOptions>
     if options.game.eq_ignore_ascii_case("UnityCN") && unity_cn_key.is_none() {
         bail!("UnityCN requires a 16-byte --unity-cn-key");
     }
+    let mut limits = unity_rs_core::loader::AssetLoadLimits::default();
+    limits.maximum_object_name_assignments = options.maximum_assets;
+    limits.maximum_total_object_name_bytes = catalog_text_budget(options.maximum_assets);
+    limits.maximum_reference_index_entries = options
+        .maximum_assets
+        .saturating_add(limits.maximum_input_files);
+    limits.maximum_object_metadata_entries = options.maximum_assets;
+    limits.maximum_object_metadata_index_bytes =
+        catalog_text_budget(options.maximum_assets).saturating_mul(4);
+    limits.maximum_container_assignments = limits
+        .maximum_container_assignments
+        .max(options.maximum_assets.saturating_mul(4));
+    limits.container_metadata.maximum_preload_references = limits
+        .container_metadata.maximum_preload_references
+        .max(options.maximum_assets.saturating_mul(4));
+    limits.container_metadata.maximum_container_entries = limits
+        .container_metadata.maximum_container_entries
+        .max(options.maximum_assets);
+    limits.container_metadata.maximum_total_string_bytes =
+        catalog_text_budget(options.maximum_assets);
     Ok(AssetLoadOptions {
+        limits,
         unity_version_override,
         unity_cn_key,
         game_variant: match options.game.to_ascii_lowercase().as_str() {
             "naraka" => unity_rs_core::game_variant::GameVariant::Naraka,
             "tot" => unity_rs_core::game_variant::GameVariant::TearsOfThemis,
             "bh3prepre" => unity_rs_core::game_variant::GameVariant::HonkaiImpact3PrePre,
+            "bh3pre" => unity_rs_core::game_variant::GameVariant::HonkaiImpact3Pre,
             "exastris" => unity_rs_core::game_variant::GameVariant::ExAstris,
             "arknightsendfield" => unity_rs_core::game_variant::GameVariant::ArknightsEndfield,
             "loveanddeepspace" => unity_rs_core::game_variant::GameVariant::LoveAndDeepspace,
@@ -918,6 +947,10 @@ fn preview_texture_limits() -> TextureReadLimits {
         maximum_decoder_working_bytes: MAX_PREVIEW_IMAGE_BYTES,
         ..TextureReadLimits::default()
     }
+}
+
+fn catalog_text_budget(maximum_assets: usize) -> usize {
+    maximum_assets.saturating_mul(256).max(256 * 1024 * 1024)
 }
 
 #[cfg(test)]

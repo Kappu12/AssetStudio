@@ -12,6 +12,10 @@ use crate::{Error, Result};
 mod decode;
 pub use decode::{AclNativeDecodeLimits, AclNativeTracks, decode_compressed_tracks};
 
+#[path = "acl_legacy.rs"]
+mod legacy;
+pub use legacy::{AclLegacyTracks, decode_legacy_compressed_clip};
+
 const RAW_HEADER_BYTES: u64 = 8;
 const MINIMUM_TRACKS_BYTES: u64 = 32;
 const MINIMUM_TRACKS_BYTES_USIZE: usize = 32;

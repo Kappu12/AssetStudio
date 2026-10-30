@@ -79,6 +79,57 @@ fn list_reads_both_assets_and_keeps_stdout_valid_json() {
     assert_eq!(list[1]["name"], "other");
 }
 
+#[test]
+fn configurable_catalog_limit_rejects_small_budgets_and_accepts_exact_capacity() {
+    let root = TempDir::new().unwrap();
+    let input = fixture(root.path());
+    let small = run(&[
+        string(&input),
+        "--operation",
+        "list",
+        "--max-assets",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(small.status.code(), Some(1));
+    assert!(small.stdout.is_empty());
+    let exact = run(&[
+        string(&input),
+        "--operation",
+        "list",
+        "--max-assets",
+        "2",
+        "--json",
+    ]);
+    assert!(
+        exact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&exact.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for invalid in ["0", "10000001", "-1", "invalid"] {
+        assert_eq!(
+            run(&[
+                string(&input),
+                "--operation",
+                "list",
+                "--max-assets",
+                invalid
+            ])
+            .status
+            .code(),
+            Some(2)
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn inspect_json_handles_non_utf8_input_paths_without_panicking() {

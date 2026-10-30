@@ -332,6 +332,54 @@ pub struct MuscleClipData {
     pub acl: Option<AclClip>,
     /// Love and Deepspace keeps transform/scalar ACL streams and maps separately.
     pub lnd_acl: Option<LoveAndDeepspaceAclClip>,
+    pub mhy_acl: Option<MhyAclClip>,
+}
+
+/// Non-SR MHY payload: byte array, alignment, then scalar binding count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MhyAclClip {
+    pub tracks: ByteRegion,
+    pub curve_count: u32,
+}
+
+impl MhyAclClip {
+    pub fn decode(
+        &self,
+        limits: crate::acl::AclNativeDecodeLimits,
+    ) -> Result<crate::acl::AclDecodedClip> {
+        let tracks = crate::acl::decode_legacy_compressed_clip(&self.tracks.region, limits)?;
+        if u32::from(tracks.bone_count) * 10 != self.curve_count {
+            return Err(Error::invalid_data(
+                "MHY ACL curve count disagrees with decoded bone tracks",
+            ));
+        }
+        let output_bytes = (tracks.values.len() as u64
+            + u64::from(tracks.frame_count)
+            + u64::from(self.curve_count))
+        .checked_mul(4)
+        .ok_or_else(|| Error::invalid_data("MHY ACL output size overflow"))?;
+        if output_bytes > limits.maximum_materialized_bytes {
+            return Err(Error::invalid_data(
+                "MHY ACL sample/time/binding output exceeds byte budget",
+            ));
+        }
+        let mut times = Vec::new();
+        times
+            .try_reserve_exact(tracks.frame_count as usize)
+            .map_err(|_| Error::invalid_data("cannot allocate MHY ACL times"))?;
+        times.extend(tracks.times());
+        let mut binding_indices = Vec::new();
+        binding_indices
+            .try_reserve_exact(self.curve_count as usize)
+            .map_err(|_| Error::invalid_data("cannot allocate MHY ACL binding indices"))?;
+        binding_indices.extend(0..self.curve_count);
+        Ok(crate::acl::AclDecodedClip {
+            times,
+            binding_indices,
+            values: tracks.values,
+            following_curve_offset: self.curve_count,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1410,6 +1458,22 @@ impl AnimationClipReader {
         let constant = ConstantClip {
             values: self.read_f32_array("AnimationClip constant sample", true)?,
         };
+        let mhy_acl = if self.game_variant == crate::game_variant::GameVariant::HonkaiImpact3Pre {
+            let tracks = self.read_byte_region("AnimationClip MHY ACL tracks", true)?;
+            let curve_count = self.reader.read_u32()?;
+            self.validate_u32_count(curve_count, "AnimationClip MHY ACL curve count")?;
+            if tracks.byte_length == 0 && curve_count != 0 {
+                return Err(Error::invalid_data(
+                    "MHY ACL declares curves without a payload",
+                ));
+            }
+            Some(MhyAclClip {
+                tracks,
+                curve_count,
+            })
+        } else {
+            None
+        };
         let lnd_acl = if self.is_love_and_deepspace() {
             Some(self.read_lnd_acl_clip()?)
         } else {
@@ -1432,6 +1496,7 @@ impl AnimationClipReader {
             binding,
             acl,
             lnd_acl,
+            mhy_acl,
         })
     }
 

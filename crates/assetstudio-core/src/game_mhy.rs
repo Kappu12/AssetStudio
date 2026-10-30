@@ -9,6 +9,7 @@ const MAX_BLOCKS: usize = 1_000_000;
 const NARAKA_MAGIC: &[u8] = &[0x15, 0x1e, 0x1c, 0x0d, 0x0d, 0x23, 0x21];
 
 struct Header<'a> {
+    size: usize,
     version: u32,
     engine: &'a [u8],
     revision: &'a [u8],
@@ -20,14 +21,14 @@ struct Header<'a> {
 }
 
 pub(super) fn normalize(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>> {
-    if !matches!(profile, "TOT" | "ArknightsEndfield") {
+    if !matches!(profile, "TOT" | "ArknightsEndfield" | "BH3Pre") {
         return normalize_single(input, profile, maximum);
     }
     ensure!(
         input.len() as u64 <= maximum,
         super::limit("Game bundle exceeds byte budget")
     );
-    let first = standard_bundle_length(input)?;
+    let first = header(input, profile)?.size;
     if first == input.len() {
         return normalize_single(input, profile, maximum);
     }
@@ -39,7 +40,7 @@ pub(super) fn normalize(input: &[u8], profile: &str, maximum: u64) -> Result<Vec
             parts.len() < 16_384,
             super::limit("Concatenated game bundle count exceeds its limit")
         );
-        let size = standard_bundle_length(&input[cursor..])?;
+        let size = header(&input[cursor..], profile)?.size;
         let end = cursor
             .checked_add(size)
             .context("Concatenated game bundle range overflow")?;
@@ -61,29 +62,6 @@ pub(super) fn normalize(input: &[u8], profile: &str, maximum: u64) -> Result<Vec
         cursor = end;
     }
     canonical_web(parts, maximum)
-}
-
-fn standard_bundle_length(input: &[u8]) -> Result<usize> {
-    let mut reader = Reader::new(input);
-    let signature = reader.string(32)?;
-    ensure!(
-        matches!(signature, b"UnityFS" | b"UnityWeb" | b"UnityRaw" | b"ENCR"),
-        "Concatenated game unit has no UnityFS header"
-    );
-    if signature != b"ENCR" {
-        ensure!(
-            (6..=8).contains(&reader.u32()?),
-            "Concatenated game unit uses an unknown version"
-        );
-        reader.string(32768)?;
-        reader.string(32768)?;
-    }
-    let size = usize::try_from(reader.u64()?)?;
-    ensure!(
-        size > reader.position && size <= input.len(),
-        "Concatenated game bundle size is invalid"
-    );
-    Ok(size)
 }
 
 fn canonical_web(parts: Vec<(String, Vec<u8>)>, maximum: u64) -> Result<Vec<u8>> {
@@ -138,6 +116,10 @@ fn normalize_single(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>
         super::limit("Game bundle exceeds byte budget")
     );
     let header = header(input, profile)?;
+    ensure!(
+        header.size == input.len(),
+        "Game bundle declared size differs from its input"
+    );
     ensure!(header.flags & !0x3ff == 0, "Game bundle uses unknown flags");
     ensure!(
         header.compressed_info <= MAX_INFO_BYTES && header.expanded_info <= MAX_INFO_BYTES,
@@ -253,7 +235,7 @@ fn normalize_single(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>
         let inverted_lz4 = profile == "ArknightsEndfield" && flags & 0x3f == 5;
         let fairguard =
             profile == "ArknightsEndfield" && index == 0 && matches!(flags & 0x3f, 2 | 3 | 5);
-        let mr0k_lz4 = matches!(profile, "TOT" | "BH3PrePre") && flags & 0x3f == 5;
+        let mr0k_lz4 = matches!(profile, "TOT" | "BH3PrePre" | "BH3Pre") && flags & 0x3f == 5;
         let block = if fairguard {
             let mut transformed = super::copy_bytes(block)?;
             super::fairguard::decrypt(&mut transformed);
@@ -449,6 +431,28 @@ fn header<'a>(input: &'a [u8], profile: &str) -> Result<Header<'a>> {
                 flags,
                 size,
             )
+        } else if profile == "BH3Pre"
+            && signature == b"UnityFS"
+            && input
+                .get(reader.position..reader.position + 4)
+                .is_some_and(|bytes| u32::from_be_bytes(bytes.try_into().expect("four bytes")) > 11)
+        {
+            let mut random = HeaderRandom::new(reader.u32()?);
+            let flags = reader.u32()? ^ random.word();
+            let size = reader.u64()? ^ random.long();
+            let expanded = reader.u32()? ^ random.word();
+            let compressed = reader.u32()? ^ random.word();
+            reader.string(32768)?;
+            reader.string(32768)?;
+            (
+                6,
+                b"5.x.x".as_slice(),
+                b"2017.4.18f1".as_slice(),
+                compressed,
+                expanded,
+                flags,
+                size,
+            )
         } else {
             let version = if signature == b"ENCR" {
                 6
@@ -491,14 +495,15 @@ fn header<'a>(input: &'a [u8], profile: &str) -> Result<Header<'a>> {
             (version, engine, revision, compressed, expanded, flags, size)
         };
     ensure!(
-        size == input.len() as u64,
-        "Game bundle declared size differs from its input"
+        size >= reader.position as u64 && size <= input.len() as u64,
+        "Game bundle declared size is outside its input"
     );
     if version >= 7 {
         let end = align16(reader.position)?;
         reader.take(end - reader.position)?;
     }
     Ok(Header {
+        size: usize::try_from(size)?,
         version,
         engine,
         revision,
@@ -821,6 +826,12 @@ mod tests {
     fn mr0k_blocks_from_original_csharp_oracle_decode_through_real_bundle_reader() {
         for (profile, encrypted, expected) in [
             (
+                "BH3Pre",
+                include_bytes!("../tests/fixtures/mhy-oracle/BH3PrePre-literal.mr0k").as_slice(),
+                include_bytes!("../tests/fixtures/mhy-oracle/BH3PrePre-literal-payload.bin")
+                    .as_slice(),
+            ),
+            (
                 "TOT",
                 include_bytes!("../tests/fixtures/mhy-oracle/TOT-literal.mr0k").as_slice(),
                 include_bytes!("../tests/fixtures/mhy-oracle/TOT-literal-payload.bin").as_slice(),
@@ -836,11 +847,57 @@ mod tests {
                 let (bundle, size) = standard_fixture(encrypted, expected.len(), 5, at_end);
                 let bundle = if profile == "BH3PrePre" {
                     bh3_header(&bundle, size)
+                } else if profile == "BH3Pre" {
+                    bh3_pre_header(&bundle, size)
                 } else {
                     bundle
                 };
                 assert_payload(normalize(&bundle, profile, 65536).unwrap(), expected);
             }
+        }
+    }
+
+    fn bh3_pre_header(standard: &[u8], size: usize) -> Vec<u8> {
+        let payload = &standard[(size + 20).next_multiple_of(16)..];
+        let mut output = b"UnityFS\0".to_vec();
+        output.extend_from_slice(&0x12345678_u32.to_be_bytes());
+        let mut random = HeaderRandom::new(0x12345678);
+        let flags = u32::from_be_bytes(standard[size + 16..size + 20].try_into().unwrap());
+        output.extend_from_slice(&(flags ^ random.word()).to_be_bytes());
+        output.extend_from_slice(&((36 + payload.len()) as u64 ^ random.long()).to_be_bytes());
+        let expanded = u32::from_be_bytes(standard[size + 12..size + 16].try_into().unwrap());
+        let compressed = u32::from_be_bytes(standard[size + 8..size + 12].try_into().unwrap());
+        output.extend_from_slice(&(expanded ^ random.word()).to_be_bytes());
+        output.extend_from_slice(&(compressed ^ random.word()).to_be_bytes());
+        output.extend_from_slice(b"v\0r\0");
+        output.extend_from_slice(payload);
+        output
+    }
+
+    #[test]
+    fn bh3_pre_keyed_headers_support_concatenation_and_reject_truncation() {
+        let expected = b"historical honkai payload";
+        let compressed = lz4_flex::block::compress(expected);
+        let (standard, size) = standard_fixture(&compressed, expected.len(), 3, false);
+        assert_payload(normalize(&standard, "BH3Pre", 65536).unwrap(), expected);
+        let encrypted = bh3_pre_header(&standard, size);
+        assert_payload(normalize(&encrypted, "BH3Pre", 65536).unwrap(), expected);
+        let mut joined = encrypted.clone();
+        joined.extend_from_slice(&standard);
+        let output = normalize(&joined, "BH3Pre", 65536).unwrap();
+        let web = unity_rs_core::web_file::WebFile::open(
+            unity_rs_core::source::Region::from_bytes(output),
+        )
+        .unwrap();
+        assert_eq!(web.entries.len(), 2);
+        for index in 0..2 {
+            assert_payload(web.read_entry(index).unwrap(), expected);
+        }
+        for end in 0..encrypted.len() {
+            assert!(
+                normalize(&encrypted[..end], "BH3Pre", 65536).is_err(),
+                "truncation {end}"
+            );
         }
     }
 

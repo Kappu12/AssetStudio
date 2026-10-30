@@ -19,7 +19,7 @@ struct Keys<'a> {
 
 pub(super) fn decrypt(input: &[u8], profile: &str) -> Result<Vec<u8>> {
     let keys = match profile {
-        "BH3PrePre" => Keys {
+        "BH3PrePre" | "BH3Pre" => Keys {
             expanded: &PACK_EXPANSION_KEY,
             block: &PACK_BLOCK_KEY,
             iv: &[],

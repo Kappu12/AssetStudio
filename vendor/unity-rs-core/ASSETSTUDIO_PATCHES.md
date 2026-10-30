@@ -81,7 +81,11 @@ Collision-baked meshes fail triangle export explicitly, matching the baseline
 which skips triangle conversion for that layout. App wrappers have original C#
 FairGuard/LZ4Inv oracles and real Session material/animation export checks.
 
-An experimental ACL 1.1 decoder and differential fixtures are retained for
-continuation, but `acl_legacy.rs` is unregistered and is not part of the built
-library or normal Cargo test run. Unity adapters are still pending. See
-`docs/LOCAL_CODEX_HANDOFF.md` at the repository root for its exact status.
+The ACL 1.1 variable-QVV decoder is registered in `acl`, including its original
+DLL/upstream C++ oracle and malformed-input tests. BH3Pre reads the original MHY
+byte-array/curve-count layout and feeds contiguous R4/T3/S3 samples into `.anim`
+and model conversion before standard curves. Root hash-zero model tracks resolve
+to their animation owner. Seed-keyed bundle headers, pack-key blocks and the
+half-resolution renderer flag are supported by the application adapter. Full/fixed
+selectors, SR and database formats remain unsupported. Unix-only extraction test
+imports are gated for strict Windows linting.

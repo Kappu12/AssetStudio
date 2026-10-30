@@ -109,6 +109,7 @@ const SUPPORTED: &[&str] = &[
     "Naraka",
     "TOT",
     "BH3PrePre",
+    "BH3Pre",
     "ExAstris",
     "LoveAndDeepspace",
     "ArknightsEndfield",
@@ -446,7 +447,7 @@ pub fn decode_container_at(
         "FakeHeader" | "ShiningNikki" => strip_fake_header(data)?,
         "OPFP" => bundle::normalize(&strip_fake_header(data)?, profile, path, maximum)?,
         "NetEase" | "PerpetualNovelty" => bundle::normalize(data, profile, path, maximum)?,
-        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" | "ArknightsEndfield" => {
+        "Naraka" | "TOT" | "BH3PrePre" | "BH3Pre" | "ExAstris" | "ArknightsEndfield" => {
             mhy::normalize(data, profile, maximum)?
         }
         "LoveAndDeepspace" => mhy::normalize(&decode_love_and_deepspace(data)?, profile, maximum)?,
@@ -496,6 +497,7 @@ fn force_standard_bundle_transform(profile: &str) -> bool {
             | "Naraka"
             | "TOT"
             | "BH3PrePre"
+            | "BH3Pre"
             | "ExAstris"
             | "ArknightsEndfield"
             | "LoveAndDeepspace"
@@ -511,7 +513,7 @@ fn transform_standard_container(profile: &str, data: &[u8]) -> bool {
     }
     if matches!(
         profile,
-        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" | "ArknightsEndfield"
+        "Naraka" | "TOT" | "BH3PrePre" | "BH3Pre" | "ExAstris" | "ArknightsEndfield"
     ) {
         for signature in [b"UnityWeb\0".as_slice(), b"UnityRaw\0".as_slice()] {
             if data.starts_with(signature)

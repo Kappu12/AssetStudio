@@ -8,7 +8,7 @@ acceptance check are separate kinds of evidence.
 | Area | Rust implementation and evidence | Remaining limits |
 | --- | --- | --- |
 | Loading | Shared file/folder sessions, multi-input loading, split files, dependencies, UnityFS/Web/Raw/WebData and backend compression readers. Acceptance tests construct serialized v17/v22 files in both byte orders and plain/LZ4 UnityFS with streamed resources. | No representative real-game corpus was supplied. Not every backend format/codec has an application acceptance fixture. |
-| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Extremely large catalogs are bounded; these limits differ from the original unbounded application. |
+| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Catalog limits default to one million objects and can be raised explicitly to ten million through GUI settings or `--max-assets`; related name/index/text budgets scale with that choice. Limits remain bounded. |
 | Text and data | TextAsset, raw object bytes, type-tree Dump/JSON, stripped MonoBehaviour schemas and MiHoYoBinData XOR. Integration tests check exact exported bytes, actual parsed trees and malformed-input failures. | Generic type-tree output requires a valid embedded or recovered schema. A raw fallback is not counted as decoded conversion. |
 | Images | Backend Texture2D/Sprite/atlas decoding and PNG/JPEG/BMP/TGA export; GUI image zoom, RGB channel toggles and alpha isolation. Unity 6000 inline and streamed texture fixtures check pixels and row orientation. | The backend's full texture-format/platform matrix has not been independently exercised here. |
 | Audio | Backend original-payload/WAV conversion; native streaming WAV playback with pause, stop, seek, volume and loop. Device-free tests check decoded samples, malformed headers, streaming seeks and actual sink state. | No physical audio output device was available. Proprietary codecs and every historical audio layout are not established as equivalent. |
@@ -22,7 +22,7 @@ acceptance check are separate kinds of evidence.
 | Asset maps | JSON/XML lists, original MessagePack `.map` caches, exact object selection and confined cache source resolution. Genuine MessagePack-CSharp plain/LZ4 single/array/multiblock fixtures test interoperability. | Legacy caches without serialized-file identity fail on ambiguous PathID/class matches. This preserves correctness rather than guessing an object. |
 | CAB maps and recovery | Original BinaryWriter `.bin` caches, transitive dependency graphs, split groups, source-base relocation and offline asset-index container recovery. Tests use independently encoded bytes and real constructed UnityFS files. | Proprietary decrypted-stream nonzero CAB offsets, game-specific container equivalence and automatic remote asset-index downloads are not ported. |
 | Managed schemas | Native PE/ECMA metadata inspection in a bounded short-lived Rust child; DLLs are never executed. Three Unity-version sets of 20 independent reference snapshots and child-process stripped-object fixtures check fields, generics, arrays, strings, references and alignment. | Dynamic SerializeReference runtime payload reconstruction, multi-module assemblies and unsupported signatures still require additional work. |
-| Game profiles | 28 accepted profiles out of 39, including Naraka/TOT/BH3PrePre/ExAstris/LoveAndDeepspace/ArknightsEndfield container and explicit field variants. Numeric encrypted split groups decode after lazy joining under shared budgets. Independent C# AES/mr0k/LZ4Lit/header oracles supplement the existing NetEase cases, and actual Session fixtures check object conversion. See [game compatibility](game-compatibility.md). | Eleven specialized profiles are explicitly rejected. Accepted profiles retain unverified game-version/opaque-codec limits. No named proprietary game's current live build has been verified. |
+| Game profiles | 29 accepted profiles out of 39, including Naraka/TOT/BH3PrePre/ExAstris/LoveAndDeepspace/ArknightsEndfield container and explicit field variants. Numeric encrypted split groups decode after lazy joining under shared budgets. Independent C# AES/mr0k/LZ4Lit/header oracles supplement the existing NetEase cases, and actual Session fixtures check object conversion. See [game compatibility](game-compatibility.md). | Ten specialized profiles are explicitly rejected. Accepted profiles retain unverified game-version/opaque-codec limits. No named proprietary game's current live build has been verified. |
 | Desktop behavior | Native dialogs, folder/file/drop/reload, virtualized catalog, worker-side filtering/preview/export, hierarchy/class definitions, Preview/Dump/JSON modes, source-channel preview, detailed model controls and bounded atomic preferences without persisting explicit UnityCN keys. Regression tests cover same-asset mode changes, stale worker results and audio cancellation. | Actual OS dialog, graphics-driver and sound-device interaction needs native acceptance testing. |
 | CLI | Legacy positional interface and useful aliases, list/inspect/scene/extract/map/model/export operations, map/cache loading, schemas, keys and explicit exit codes. Child-process tests exercise actual binary invocations. | Unsupported legacy behavior is a visible error. See [CLI details](../crates/assetstudio-cli/README.md). |
 | Output preservation | Staged atomic output, no-clobber defaults, portable names, symlink/path checks, shared budgets and protection for loaded sources, split/resource companions, DLLs, schema/index/cache/key inputs and hardlink aliases. Regression tests compare original bytes after overwrite attempts. | No claim of protection against a separate hostile process concurrently replacing filesystem entries. |
@@ -48,3 +48,23 @@ The subsequent Endfield runtime passed 1,015 workspace tests (14 optional extern
 checks ignored) and strict workspace Clippy. Its optimized CLI/profile probe
 passed. A fresh optimized GUI rebuild remains required; see the
 [local handoff](LOCAL_CODEX_HANDOFF.md).
+
+## Windows continuation, 2026-10-30
+
+- Fixed deleted-source protection across Windows canonical path prefixes, native
+  LF fixture creation in Python packaging checks, and Unix-only test imports.
+- Registered the preserved ACL 1.1 decoder and integrated BH3Pre MHY parsing,
+  standalone `.anim` expansion and model samples. Ten original-DLL/C++ codec
+  fixtures and three complete serialized clip fixtures establish this scope.
+  Modern model root bindings now resolve to their animation owner.
+- Added BH3Pre seed-keyed headers, pack-key blocks, concatenation and renderer
+  fields, with malformed-input and original primitive-oracle checks.
+- Added configurable bounded catalog capacity after the supplied 53.6 GB
+  Facepunch Rust folder exceeded the original one-million-name limit.
+- A fresh optimized MSVC GUI/CLI build and both native smoke checks passed.
+  Current Windows checks passed 1,005 Rust tests (14 optional external tests
+  ignored) and all 35 available Python tests (two symlink tests unavailable).
+  Strict workspace Clippy, formatting and workflow-policy checks passed.
+
+These checks supersede the old unresolved optimized-GUI build note for Windows.
+They do not establish macOS/hosted-CI execution or the ten rejected profiles.

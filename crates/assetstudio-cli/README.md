@@ -45,6 +45,7 @@ Legacy positional invocations and these option spellings remain available:
 | `--names`, `--filter` | Case-insensitive regexes, or one file containing one regex per line. |
 | `--containers` | The same filtering on recovered container names. |
 | `--path-ids`, `--path_ids` | Restrict selection to exact signed 64-bit PathIDs; combine with class, name, and container filters. |
+| `--max-assets` | Catalog capacity from 1 to 10000000 (default 1000000); name, reference-index and text budgets scale with it. Use larger values for large extracted collections. |
 | `--game` | Explicit format profile, defaulting to `Normal`; missing game-specific readers produce an error. |
 | `--unity_version` | Override the engine version used to decode stripped-version files. |
 | `--key_index`, `--keys-file` | Select a UnityCN key by index from the original public key list or a supplied JSON file. |
@@ -158,7 +159,7 @@ The separate backend `acl::decode_compressed_tracks` API decodes supported
 resident standard ACL samples; it does not automatically provide a game's
 Unity binding map or enable opaque game ACL `.anim`/FBX export. See the
 [feature table](../../docs/feature-parity.md) and
-[27-profile compatibility matrix](../../docs/game-compatibility.md).
+[game-profile compatibility matrix](../../docs/game-compatibility.md).
 
 Numeric encrypted `.splitN` parts are joined lazily before wrapper decoding.
 Selecting any part discovers the full contiguous group, and overlapping inputs

@@ -277,6 +277,9 @@ impl RendererObjectReader {
         let cast_shadows = self.reader.read_u8()?;
         let receive_shadows = self.reader.read_bool()?;
         let _dynamic_occludee = self.reader.read_u8()?;
+        if self.game_variant == crate::game_variant::GameVariant::HonkaiImpact3Pre {
+            let _allow_half_resolution = self.reader.read_u8()?;
+        }
         if self.version >= (2021, 1, 0) {
             let _static_shadow_caster = self.reader.read_u8()?;
             if self.game_variant == crate::game_variant::GameVariant::ArknightsEndfield {
@@ -815,6 +818,24 @@ mod tests {
             object.extend_from_slice(&2_i32.to_le_bytes());
         }
         object
+    }
+
+    #[test]
+    fn honkai_pre_half_resolution_flag_preserves_renderer_references() {
+        for version in ["2017.4.18f1", "2022.3.62f1"] {
+            let mut object = renderer_prefix(version);
+            object.insert(16, 0x55);
+            // The extra flag consumes one byte of the standard header padding.
+            object.remove(if version.starts_with("2017") { 20 } else { 24 });
+            let mut file = parse_asset(MESH_RENDERER_CLASS_ID, version, &object);
+            file.game_variant = crate::game_variant::GameVariant::HonkaiImpact3Pre;
+            let renderer = read_mesh_renderer(&file, 0, RendererReadLimits::default()).unwrap();
+            assert_eq!(renderer.renderer.materials[0].path_id, 21);
+            assert_eq!(renderer.renderer.static_batch_info.first_sub_mesh, 3);
+            assert_eq!(renderer.renderer.static_batch_root.path_id, 31);
+            assert_eq!(renderer.renderer.sorting_order, 43);
+            assert_eq!(renderer.trailing_bytes, 0);
+        }
     }
 
     #[test]

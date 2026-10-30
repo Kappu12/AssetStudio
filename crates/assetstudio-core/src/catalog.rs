@@ -26,6 +26,8 @@ pub struct LoadOptions {
     pub unity_cn_key: Option<String>,
     pub xor_key: u8,
     pub continue_on_error: bool,
+    /// Maximum objects retained in one session; metadata budgets scale with it.
+    pub maximum_assets: usize,
 }
 
 impl Default for LoadOptions {
@@ -36,12 +38,17 @@ impl Default for LoadOptions {
             unity_cn_key: None,
             xor_key: 0,
             continue_on_error: false,
+            maximum_assets: 1_000_000,
         }
     }
 }
 
 impl LoadOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=10_000_000).contains(&self.maximum_assets),
+            "asset limit must be between 1 and 10000000"
+        );
         crate::games::validate_profile(&self.game)?;
         crate::session::backend_options(self)?;
         Ok(())

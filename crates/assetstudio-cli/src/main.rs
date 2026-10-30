@@ -41,6 +41,9 @@ struct Args {
     /// Game-specific format profile. Normal reads standard Unity files.
     #[arg(long, default_value = "Normal")]
     game: String,
+    /// Maximum catalog objects. Larger values also raise bounded metadata budgets.
+    #[arg(long = "max-assets", default_value_t = 1_000_000, value_parser = clap::value_parser!(u32).range(1..=10_000_000))]
+    maximum_assets: u32,
     /// Unity version override, for example 2022.3.62f1.
     #[arg(long = "unity_version", alias = "unity-version")]
     unity_version: Option<String>,
@@ -988,6 +991,7 @@ fn load_options(args: &Args) -> Result<(LoadOptions, Option<PathBuf>)> {
             unity_cn_key,
             xor_key: args.key.unwrap_or(0),
             continue_on_error: args.continue_on_error,
+            maximum_assets: args.maximum_assets as usize,
         },
         key_source,
     ))

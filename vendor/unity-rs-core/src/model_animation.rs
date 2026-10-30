@@ -198,7 +198,7 @@ fn select_clips(
                 &mut selected,
                 &mut seen,
                 clip,
-                None,
+                Some(animator.game_object),
                 animator.avatar,
                 maximum,
             )?;
@@ -325,7 +325,7 @@ impl AnimationBuildState {
                 .map(str::to_owned);
             self.convert_explicit_curves(clip, base_path.as_deref(), blend_shapes)?
         } else {
-            self.convert_muscle_curves(model, selection.avatar, clip, blend_shapes, acl_decoder)?
+            self.convert_muscle_curves(model, selection, clip, blend_shapes, acl_decoder)?
         };
         self.clips.try_reserve(1).map_err(|error| {
             Error::invalid_data(format!("cannot grow model animation clips: {error}"))
@@ -459,7 +459,7 @@ impl AnimationBuildState {
     fn convert_muscle_curves(
         &mut self,
         model: &ModelIr,
-        avatar_key: Option<SceneObjectKey>,
+        selection: ClipSelection,
         clip: &AnimationClip,
         blend_shapes: &BlendShapeIndex,
         acl_decoder: Option<&dyn AclDecoder>,
@@ -467,7 +467,7 @@ impl AnimationBuildState {
         let muscle = clip.muscle_clip.as_ref().ok_or_else(|| {
             Error::unsupported("model animation conversion requires an AnimationClip muscle clip")
         })?;
-        let decoded_acl = muscle
+        let mut decoded_acl = muscle
             .clip
             .acl
             .as_ref()
@@ -495,7 +495,28 @@ impl AnimationBuildState {
                 )
             })
             .transpose()?;
+        if let Some(mhy) = muscle
+            .clip
+            .mhy_acl
+            .as_ref()
+            .filter(|acl| acl.tracks.byte_length != 0)
+        {
+            if decoded_acl.is_some() {
+                return Err(Error::invalid_data(
+                    "clip contains two incompatible ACL payloads",
+                ));
+            }
+            decoded_acl = Some(mhy.decode(crate::acl::AclNativeDecodeLimits {
+                compressed: AclCompressedTracksLimits {
+                    maximum_compressed_bytes: self.limits.clip.maximum_packed_bytes,
+                    maximum_decompressed_values: self.limits.maximum_total_sample_values as u64,
+                    ..AclCompressedTracksLimits::default()
+                },
+                maximum_materialized_bytes: self.limits.clip.maximum_total_allocation_bytes,
+            })?);
+        }
         let layout = BindingLayout::build(&clip.binding_constant.generic_bindings)?;
+        let avatar_key = selection.avatar;
         let avatar = avatar_key.and_then(|key| model.avatar(key));
         let avatar_paths = avatar_key
             .and_then(|key| self.avatar_path_indexes.get(key))
@@ -509,6 +530,7 @@ impl AnimationBuildState {
         let mut blend_shape_tracks = Vec::new();
         let mut by_blend_shape = HashMap::new();
         let mut context = MuscleBuildContext {
+            root: selection.legacy_base,
             paths: &self.paths,
             avatar_paths,
             layout: &layout,
@@ -766,6 +788,7 @@ const fn binding_width(binding: GenericBinding) -> usize {
 }
 
 struct MuscleBuildContext<'a, 'b> {
+    root: Option<SceneObjectKey>,
     paths: &'a ModelPathIndex,
     avatar_paths: Option<AvatarPathResolver<'a>>,
     layout: &'a BindingLayout,
@@ -1248,7 +1271,9 @@ fn resolve_muscle_track(
     context: &mut MuscleBuildContext<'_, '_>,
     path_hash: u32,
 ) -> Result<Option<usize>> {
-    let Some(node) = context.paths.resolve_hash(path_hash, context.avatar_paths) else {
+    let resolved = if path_hash == 0 { context.root } else { None }
+        .or_else(|| context.paths.resolve_hash(path_hash, context.avatar_paths));
+    let Some(node) = resolved else {
         return Ok(None);
     };
     if let Some(index) = context.by_node.get(&node).copied() {
@@ -3231,6 +3256,7 @@ mod tests {
         let mut modern_total_keys = 0;
         let mut modern_total_strings = paths.total_string_bytes + blend_shapes.total_string_bytes;
         let mut modern = MuscleBuildContext {
+            root: None,
             paths: &paths,
             avatar_paths: None,
             layout: &layout,
@@ -3271,6 +3297,7 @@ mod tests {
         let mut by_blend_shape = HashMap::new();
         let mut total_string_bytes = paths.total_string_bytes;
         let mut context = MuscleBuildContext {
+            root: None,
             paths: &paths,
             avatar_paths: None,
             layout: &layout,
@@ -3423,6 +3450,7 @@ mod tests {
         let mut by_blend_shape = HashMap::new();
         let mut total_string_bytes = paths.total_string_bytes;
         let mut context = MuscleBuildContext {
+            root: None,
             paths,
             avatar_paths: None,
             layout,
@@ -3457,6 +3485,7 @@ mod tests {
         let mut by_blend_shape = HashMap::new();
         let mut total_string_bytes = paths.total_string_bytes;
         let mut context = MuscleBuildContext {
+            root: None,
             paths,
             avatar_paths: None,
             layout,
@@ -3539,6 +3568,7 @@ mod tests {
             binding: None,
             acl: None,
             lnd_acl: None,
+            mhy_acl: None,
         }
     }
 

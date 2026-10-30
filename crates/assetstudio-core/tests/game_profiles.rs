@@ -178,18 +178,19 @@ fn options(profile: &str) -> LoadOptions {
 }
 
 #[test]
-fn six_new_profiles_load_real_serialized_text_and_export_exact_payloads() {
+fn implemented_profiles_load_real_serialized_text_and_export_exact_payloads() {
     for profile in [
         "Naraka",
         "TOT",
         "BH3PrePre",
+        "BH3Pre",
         "ExAstris",
         "LoveAndDeepspace",
         "ArknightsEndfield",
     ] {
         let source = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
-        let platform = if matches!(profile, "TOT" | "BH3PrePre") {
+        let platform = if matches!(profile, "TOT" | "BH3PrePre" | "BH3Pre") {
             -2
         } else {
             13

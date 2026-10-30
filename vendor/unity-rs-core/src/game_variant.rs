@@ -16,6 +16,8 @@ pub enum GameVariant {
     TearsOfThemis,
     /// Historical Honkai Impact 3 build preceding the other BH3 variants.
     HonkaiImpact3PrePre,
+    /// Honkai Impact 3's historical MHY ACL and half-resolution renderer layout.
+    HonkaiImpact3Pre,
     /// Ex Astris texture settings and Mesh collider metadata.
     ExAstris,
     /// Love and Deepspace's material, mesh, shader and controller additions.
@@ -29,7 +31,12 @@ impl GameVariant {
     /// Matches the baseline `IsMhyGroup` player-layout override only for the
     /// explicitly implemented members of that group. Other platforms survive.
     pub(crate) const fn effective_target_platform(self, declared: i32) -> i32 {
-        if declared == -2 && matches!(self, Self::TearsOfThemis | Self::HonkaiImpact3PrePre) {
+        if declared == -2
+            && matches!(
+                self,
+                Self::TearsOfThemis | Self::HonkaiImpact3PrePre | Self::HonkaiImpact3Pre
+            )
+        {
             19 // BuildTarget.StandaloneWindows64
         } else {
             declared
@@ -43,7 +50,11 @@ mod tests {
 
     #[test]
     fn player_override_is_explicit_and_does_not_change_other_platforms() {
-        for variant in [GameVariant::TearsOfThemis, GameVariant::HonkaiImpact3PrePre] {
+        for variant in [
+            GameVariant::TearsOfThemis,
+            GameVariant::HonkaiImpact3PrePre,
+            GameVariant::HonkaiImpact3Pre,
+        ] {
             assert_eq!(variant.effective_target_platform(-2), 19);
             assert_eq!(variant.effective_target_platform(13), 13);
             assert_eq!(variant.effective_target_platform(19), 19);

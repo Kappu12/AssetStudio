@@ -186,6 +186,7 @@ struct LoadSettings {
     cab_map: String,
     cab_base: String,
     continue_on_error: bool,
+    maximum_assets: String,
 }
 
 impl LoadSettings {
@@ -216,6 +217,14 @@ impl LoadSettings {
             unity_cn_key: nonempty(&self.unity_cn_key),
             xor_key,
             continue_on_error: self.continue_on_error,
+            maximum_assets: if self.maximum_assets.trim().is_empty() {
+                1_000_000
+            } else {
+                self.maximum_assets
+                    .trim()
+                    .parse()
+                    .map_err(|_| "Asset limit must be a whole number from 1 to 10000000.")?
+            },
         };
         if options.game.eq_ignore_ascii_case("UnityCN") && options.unity_cn_key.is_none() {
             // Resource lookup belongs to the load worker; validate all other
@@ -377,6 +386,7 @@ impl StudioApp {
                 "xor_key":load.xor_key,"asset_index":load.asset_index,"schemas":load.schemas,
                 "dummy_dlls":load.dummy_dlls,"cab_map":load.cab_map,"cab_base":load.cab_base,
                 "continue_on_error":load.continue_on_error,
+                "maximum_assets":load.maximum_assets,
             },
             "export": {
                 "mode":match self.export_options.mode {ExportMode::Convert=>"Convert",ExportMode::Raw=>"Raw",ExportMode::Dump=>"Dump",ExportMode::Json=>"Json"},
@@ -434,6 +444,7 @@ impl StudioApp {
         for (name, target) in [
             ("game", &mut settings.game),
             ("unity_version", &mut settings.unity_version),
+            ("maximum_assets", &mut settings.maximum_assets),
             ("unity_cn_keys_file", &mut settings.unity_cn_keys_file),
             ("xor_key", &mut settings.xor_key),
             ("asset_index", &mut settings.asset_index),
@@ -2579,6 +2590,7 @@ impl StudioApp {
                     }
                 });
                 ui.end_row();
+                ui.label("Maximum catalog assets"); ui.add(TextEdit::singleline(&mut self.load_settings.maximum_assets).hint_text("1000000 (up to 10000000)")); ui.end_row();
                 ui.label("Unity version override"); ui.add(TextEdit::singleline(&mut self.load_settings.unity_version).hint_text("Use the version stored in the file")); ui.end_row();
                 ui.label("UnityCN key file");
                 ui.horizontal(|ui| {
