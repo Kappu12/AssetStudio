@@ -3753,6 +3753,7 @@ mod tests {
         let roots = tree.checked_roots(&nodes);
         assert_eq!(roots, vec![root]);
         if std::env::var_os("ASSETSTUDIO_BLENDER_PROBE").is_some() {
+            std::fs::create_dir_all(&output).unwrap();
             let report = crate::blender_bridge::send(
                 &session,
                 &roots,
