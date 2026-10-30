@@ -420,6 +420,85 @@ fn model_session() -> Session {
 }
 
 #[test]
+fn blender_recovers_maps_from_other_loaded_files_and_rejects_ambiguous_matches() {
+    for ambiguous in [false, true] {
+        let mut missing = vec![(
+            28,
+            72,
+            texture_object("rocket_normal", &[128, 128, 255, 255]),
+        )];
+        if ambiguous {
+            missing.push((28, 73, texture_object("rocket_normal", &[255, 0, 0, 255])));
+        }
+        let session = Session::from_regions(
+            [
+                (
+                    "CAB-model".into(),
+                    Region::from_bytes(objects_file(&[
+                        (1, 1, model_game_object(&[11, 21, 31])),
+                        (4, 11, model_transform()),
+                        (33, 21, model_mesh_filter()),
+                        (23, 31, model_renderer()),
+                        (43, 51, model_mesh()),
+                        (21, 61, material_named("rocket", [1.0; 4])),
+                        (28, 71, texture_object("rocket_albedo", &[255, 0, 0, 255])),
+                    ])),
+                ),
+                (
+                    "CAB-other-textures".into(),
+                    Region::from_bytes(objects_file(&missing)),
+                ),
+            ],
+            &LoadOptions::default(),
+        )
+        .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let report = session
+            .export_blender_models(
+                output.path(),
+                &[AssetKey {
+                    file_index: 0,
+                    path_id: 1,
+                }],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let manifest = report
+            .written
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "assetstudio-materials.json")
+            })
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+        let material = &value["materials"][0];
+        assert_eq!(material["name"], "rocket");
+        assert_eq!(material["fbx_name"], "ASMaterial_0_61");
+        assert_eq!(material["channels"]["albedo"]["source"], "reference");
+        if ambiguous {
+            assert!(material["channels"]["normal"].is_null());
+            assert!(
+                material["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("2 catalog matches")
+            );
+        } else {
+            assert_eq!(material["channels"]["normal"]["source"], "catalog");
+            let texture = manifest
+                .parent()
+                .unwrap()
+                .join(material["channels"]["normal"]["file"].as_str().unwrap());
+            assert!(fs::read(texture).unwrap().starts_with(b"\x89PNG"));
+        }
+    }
+}
+
+#[test]
 fn hierarchy_navigation_resolves_mesh_owners_and_split_exports_separate_packages() {
     let mut second_transform = model_transform();
     second_transform[4..12].copy_from_slice(&2_i64.to_le_bytes());

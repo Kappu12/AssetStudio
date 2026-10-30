@@ -26,6 +26,7 @@ struct ModelBudget {
     used: u64,
     maximum: u64,
     options: ModelExportOptions,
+    blender: bool,
 }
 
 impl Session {
@@ -64,7 +65,48 @@ impl Session {
         maximum_total: u64,
         options: &ModelExportOptions,
     ) -> Result<OperationReport> {
+        self.export_model_packages(output, format, roots, maximum_total, options, false, None)
+    }
+
+    /// Exports split FBX packages with the Facepunch shader manifest and recovers
+    /// missing maps from the loaded Texture2D catalog for the standalone bridge.
+    pub fn export_blender_models(
+        &self,
+        output: &Path,
+        roots: &[AssetKey],
+        options: &ModelExportOptions,
+        progress: Option<&crate::ProgressObserver>,
+    ) -> Result<OperationReport> {
+        if roots.is_empty() {
+            bail!("select or tick at least one model first");
+        }
+        let mut options = *options;
+        options.include_materials = true;
+        options.include_textures = true;
+        self.export_model_packages(
+            output,
+            ModelFormat::FbxBinary,
+            roots,
+            MAX_EXPORT_TOTAL_BYTES,
+            &options,
+            true,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn export_model_packages(
+        &self,
+        output: &Path,
+        format: ModelFormat,
+        roots: &[AssetKey],
+        maximum_total: u64,
+        options: &ModelExportOptions,
+        blender: bool,
+        progress: Option<&crate::ProgressObserver>,
+    ) -> Result<OperationReport> {
         options.validate()?;
+        crate::session::report_progress(progress, "Building model hierarchy", 0, None);
         if roots.len() > 1_000_000 {
             bail!("model root count exceeds catalog limit");
         }
@@ -99,7 +141,9 @@ impl Session {
             used: 0,
             maximum: maximum_total,
             options: *options,
+            blender,
         };
+        let texture_catalog = blender.then(|| crate::blender_materials::TextureCatalog::new(self));
         if roots.is_empty() {
             let model = build_model_ir(
                 self.studio.collection(),
@@ -113,10 +157,17 @@ impl Session {
                 format,
                 &mut budget,
                 &mut report,
+                texture_catalog.as_ref(),
             )?;
         } else {
             let mut seen = HashSet::new();
-            for &root in roots {
+            for (index, &root) in roots.iter().enumerate() {
+                crate::session::report_progress(
+                    progress,
+                    "Exporting models and finding textures",
+                    index,
+                    Some(roots.len()),
+                );
                 if !seen.insert(root) {
                     continue;
                 }
@@ -151,6 +202,7 @@ impl Session {
                         format,
                         &mut budget,
                         &mut report,
+                        texture_catalog.as_ref(),
                     )
                 });
                 if let Err(error) = result {
@@ -158,9 +210,16 @@ impl Session {
                 }
             }
         }
+        crate::session::report_progress(
+            progress,
+            "Models exported",
+            roots.len(),
+            Some(roots.len()),
+        );
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_model_package(
         &self,
         destination: &SafeOutput,
@@ -169,6 +228,7 @@ impl Session {
         format: ModelFormat,
         budget: &mut ModelBudget,
         report: &mut OperationReport,
+        texture_catalog: Option<&crate::blender_materials::TextureCatalog<'_>>,
     ) -> Result<()> {
         apply_model_options(&mut model, &budget.options)?;
         if !model.nodes.iter().any(|node| {
@@ -198,7 +258,7 @@ impl Session {
             .maximum
             .checked_sub(budget.used)
             .context("model output budget exhausted")?;
-        let textures = if budget.options.include_textures {
+        let mut textures = if budget.options.include_textures {
             SceneTextureSet::from_model(
                 self.studio.collection(),
                 &model,
@@ -210,6 +270,15 @@ impl Session {
             )?
         } else {
             SceneTextureSet::default()
+        };
+        let blender_manifest = if budget.blender {
+            Some(
+                texture_catalog
+                    .context("missing Blender texture catalog")?
+                    .manifest(self, &mut model, &mut textures, remaining)?,
+            )
+        } else {
+            None
         };
         let texture_bytes = textures.textures.iter().try_fold(0u64, |sum, texture| {
             sum.checked_add(texture.encoded.len() as u64)
@@ -230,6 +299,13 @@ impl Session {
         let model_name = format!("{name}.{extension}");
         let mut file = File::create(stage.path().join(&model_name))?;
         let mut extra_names = Vec::new();
+        if let Some(manifest) = blender_manifest {
+            let manifest_name = "assetstudio-materials.json";
+            let mut manifest_file = File::create(stage.path().join(manifest_name))?;
+            serde_json::to_writer_pretty(&mut manifest_file, &manifest)?;
+            manifest_file.sync_all()?;
+            extra_names.push(manifest_name.to_owned());
+        }
         match format {
             ModelFormat::FbxAscii | ModelFormat::FbxBinary => {
                 let animations = if budget.options.include_animations {

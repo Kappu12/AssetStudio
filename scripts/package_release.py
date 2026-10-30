@@ -342,7 +342,7 @@ def inspect_zip(path: Path, expected_version: str) -> None:
                 raise ValueError(f"Unsafe ZIP member: {name!r}")
             if not item.parts or archive.getinfo(name).is_dir():
                 raise ValueError("ZIP must contain files only")
-        required = set(BINARIES + DOCUMENTS + ("package-manifest.json",))
+        required = set(BINARIES + DOCUMENTS + ("package-manifest.json", "assetstudio_bridge.zip"))
         required.update(PACKAGE_RESOURCES)
         required.update(VENDORED_LICENSES)
         required.update("licenses/unity-rs-core/" + name for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS)
@@ -395,6 +395,8 @@ def make_package(
             shutil.copy2(build_dir / name, stage / name)
         for name in DOCUMENTS:
             shutil.copy2(root / name, stage / name)
+        from package_blender_extension import package as package_blender_extension
+        package_blender_extension(stage / "assetstudio_bridge.zip", root)
         for name, source in PACKAGE_RESOURCES.items():
             shutil.copy2(root / source, stage / name)
         for name, source in VENDORED_LICENSES.items():
@@ -410,6 +412,7 @@ def make_package(
             "docs/game-compatibility.md", "docs/review-sweeps.md", "docs/releasing.md",
             "docs/reviews/sweep2.md", "docs/reviews/sweep2-source-ledger.json",
             "crates/assetstudio-cli/README.md",
+            "docs/blender-bridge.md",
         ):
             document = root / name
             if document.is_file():

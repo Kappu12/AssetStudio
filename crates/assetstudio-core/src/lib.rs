@@ -3,6 +3,7 @@
 
 mod animation;
 pub mod asset_map;
+mod blender_materials;
 pub mod cab_map;
 mod catalog;
 pub mod class_structures;

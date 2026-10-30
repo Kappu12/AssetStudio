@@ -1,4 +1,44 @@
-# Model navigation and checkbox exports — 2026-10-30 Windows
+# Standalone Rust Blender bridge — 2026-10-30 Windows
+
+New top-toolbar Export to Blender sends checked hierarchy roots (preferred) or
+selected GameObjects/Animators. GUI worker exports split FBX packages and waits
+for the Blender receipt, updating the existing progress footer. Transport is a
+local atomic JSON file queue under LOCALAPPDATA/AssetStudio/BlenderBridge. An
+environment override isolates acceptance tests. Packages remain there because
+imported image paths reference them. Canonical Windows output paths must also
+be used when stripping the job prefix; otherwise strip_prefix fails.
+
+blender_extension/assetstudio_bridge is a separately GPL-3.0-or-later extension.
+It bundles an editable copy of Rust Toolset 3.3.0 by llennoco's Rust shader and
+two nested node groups, renamed AssetStudio Rust, saved in Blender 5.3. No game
+images/geometry, Rust Toolset/Ruster modules or linked shader libraries ship.
+Runtime imports only bpy and Python's standard library. The extension uses its
+own node copy even if a user group named Rust is present. The native extension
+manager validated and installed/enabled it in the user's Blender 5.3 profile,
+preserving all 15 previous addon preferences; backup/evidence lives in ignored
+target/acceptance/blender-bridge. Blender was closed during installation.
+
+Core blender_materials builds one catalog texture-name index per batch and
+emits original Unity channels/UV transforms/floats/colors into the sidecar.
+Stable FBX material IDs prevent same-name collisions. Direct references win;
+missing companions use exact material/referenced-map stems plus known Rust
+suffixes (including workshop _MainTex_<id> names). Unique same-file candidates
+win over other bundles. Ambiguous matches are reported and left unassigned.
+Synthetic cross-file recovery and duplicate rejection tests pass. The copied
+node gets specular/metallic output, Unity packed normals and alpha, sRGB/data
+colour spaces, UV transforms, normal strength and occlusion strength.
+
+Factory Blender real DragonLauncher proof: 23 imported objects, ten meshes,
+48,072 vertices, one armature, eight materials, 29 texture nodes. Repeat imports
+retain all material mappings; claimed requests cannot import twice. Fault
+injection verifies object rollback, original objects/selection remain intact,
+and Rust extensions are disabled. See scripts/validate_blender_bridge.py and
+target/acceptance/blender-bridge/blender-evidence.json. Native ZIP installation
+is also tested in an isolated profile. Full Rust suite: 1,032 passed/17 ignored;
+strict Clippy and Python release checks pass. Release packaging now includes
+assetstudio_bridge.zip and docs/blender-bridge.md.
+
+# Model navigation and checkbox exports — earlier checkpoint
 
 The user's screenshot showed clicks intercepted by selectable table-cell text.
 Row child UIs now disable text selection; pointer regressions click all four

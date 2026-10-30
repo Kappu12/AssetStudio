@@ -7,6 +7,8 @@ bytes so the real publisher must complete the same download/hash verification.
 from __future__ import annotations
 
 import json
+import io
+import shutil
 import os
 import struct
 from pathlib import Path
@@ -66,6 +68,7 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.build = self.root / "target" / "release"
         self.build.mkdir(parents=True)
+        shutil.copytree(SOURCE_ROOT / "blender_extension", self.root / "blender_extension", ignore=shutil.ignore_patterns("__pycache__"))
         self.backend = self.root / BACKEND_PATH
         self.backend.mkdir(parents=True)
         (self.backend / "Cargo.toml").write_text('[package]\nname = "unity-rs-core"\nversion = "0.6.1"\n', encoding="utf-8", newline="")
@@ -134,6 +137,10 @@ class PackageTests(Fixture):
             names = set(package.namelist())
             self.assertTrue(set(BINARIES + DOCUMENTS).issubset(names))
             self.assertEqual(package.read("Keys.json"), b"[]\n")
+            with zipfile.ZipFile(io.BytesIO(package.read("assetstudio_bridge.zip"))) as extension:
+                self.assertIn("rust_shader.blend", extension.namelist())
+                self.assertIn("LICENSE.txt", extension.namelist())
+                self.assertFalse(any("__pycache__" in name for name in extension.namelist()))
             self.assertEqual(package.read("licenses/managed-schema-templates/LICENSE"), b"Fixture vendored source MIT notice\n")
             for name, contents in linked_documents.items():
                 self.assertEqual(package.read(name), contents.encode("utf-8"))

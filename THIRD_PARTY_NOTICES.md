@@ -2,6 +2,13 @@
 
 AssetStudio is distributed under the MIT license in `LICENSE`.
 
+The separately packaged **AssetStudio Rust Bridge** Blender extension is GPL-3.0-or-later.
+Its bundled editable shader copies the Rust node and nested groups from Rust
+Toolset 3.3.0 by llennoco. Its license and provenance are in
+`blender_extension/assetstudio_bridge/LICENSE.txt` and `NOTICE.md`, also included
+inside `assetstudio_bridge.zip`. The application communicates with it through
+model files and JSON; Rust Toolset and Ruster are not runtime dependencies.
+
 ## Original implementation and format research
 
 The original AssetStudio implementation and this fork credit Radu (2016),

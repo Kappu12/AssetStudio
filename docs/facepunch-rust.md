@@ -90,6 +90,15 @@ external file, hierarchy path or Avatar.
 
 ## Verified scope
 
+The top toolbar's **Export to Blender** sends checked hierarchy roots or selected
+GameObjects/Animators to the standalone [Blender bridge](blender-bridge.md).
+The bridge bundles the Rust material node, maps Unity texture properties and
+searches the entire loaded Texture2D catalog for missing companion maps. It
+does not require Rust Toolset or Ruster. The real DragonLauncher viewmodel
+imports with ten meshes, one armature, eight mapped materials and 29 texture
+nodes. Factory Blender checks cover packed alpha links, colour spaces, repeat
+imports, original-scene preservation and per-model rollback.
+
 The supplied 53.6 GB corpus loads 6,591,789 assets without load diagnostics.
 Real PNG, WAV and OBJ exports validate. The camper FBX exports without failures
 and imports into Blender with 78 meshes, 34,188 vertices, 30,374 polygons, three

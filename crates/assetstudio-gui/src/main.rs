@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod blender_bridge;
 mod hierarchy;
 mod preferences;
 mod preview_geometry;

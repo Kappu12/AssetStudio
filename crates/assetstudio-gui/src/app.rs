@@ -1406,6 +1406,41 @@ impl StudioApp {
         self.export_model_roots(roots, ModelFormat::FbxBinary, context);
     }
 
+    fn export_to_blender(&mut self, context: &egui::Context) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let mut roots = self.scene_tree.checked_roots(&self.scene);
+        if roots.is_empty() {
+            roots = self
+                .selected
+                .iter()
+                .filter_map(|key| self.by_key.get(key).map(|&index| &self.assets[index]))
+                .filter(|asset| matches!(asset.class_id, 1 | 95))
+                .map(|asset| asset.key)
+                .collect();
+        }
+        if roots.is_empty() {
+            self.error("Tick models in Scene hierarchy, or select a GameObject or Animator. For a Mesh, right-click → Show in scene hierarchy → Model root first.");
+            return;
+        }
+        roots.sort_unstable();
+        let options = self.model_options;
+        self.start_task_with_progress(
+            TaskKind::Export,
+            "Exporting to Blender",
+            context,
+            move |progress| {
+                crate::blender_bridge::send(&session, &roots, &options, &progress)
+                    .map(|report| TaskPayload::Report {
+                        operation: "Blender import",
+                        report,
+                    })
+                    .map_err(|error| format!("{error:#}"))
+            },
+        );
+    }
+
     fn export_model_roots(
         &mut self,
         roots: Vec<AssetKey>,
@@ -1646,6 +1681,11 @@ impl StudioApp {
             if self.session.is_some() {
                 ui.separator();
                 ui.add_enabled_ui(idle, |ui| {
+                    if ui.button("Export to Blender")
+                        .on_hover_text("Send checked hierarchy models, or selected GameObjects, with Rust materials and textures to the standalone Blender bridge")
+                        .clicked() {
+                        self.export_to_blender(&context);
+                    }
                     if ui
                         .add_enabled(
                             !self.selected.is_empty(),
@@ -3712,6 +3752,30 @@ mod tests {
         tree.set_checked(tree.visible[position], true);
         let roots = tree.checked_roots(&nodes);
         assert_eq!(roots, vec![root]);
+        if std::env::var_os("ASSETSTUDIO_BLENDER_PROBE").is_some() {
+            let report = crate::blender_bridge::send(
+                &session,
+                &roots,
+                &ModelExportOptions::default(),
+                &crate::progress::Progress::default(),
+            )
+            .unwrap();
+            assert!(report.failed.is_empty(), "{:?}", report.failed);
+            let fbx = report
+                .written
+                .iter()
+                .find(|path| path.extension().is_some_and(|ext| ext == "fbx"))
+                .unwrap();
+            std::fs::write(
+                output.join("blender-evidence.json"),
+                serde_json::to_vec_pretty(
+                    &serde_json::json!({"root":root,"fbx":fbx,"report":report}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            return;
+        }
         let now = std::time::Instant::now();
         let report = session
             .export_scene_with_options(
