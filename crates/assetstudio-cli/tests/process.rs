@@ -130,7 +130,8 @@ fn configurable_catalog_limit_rejects_small_budgets_and_accepts_exact_capacity()
     }
 }
 
-#[cfg(unix)]
+// macOS rejects invalid UTF-8 filenames before the CLI can inspect the file.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn inspect_json_handles_non_utf8_input_paths_without_panicking() {
     use std::ffi::OsString;
@@ -154,6 +155,29 @@ fn inspect_json_handles_non_utf8_input_paths_without_panicking() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["assets"], 2);
     assert!(value["input"].as_str().unwrap().contains('\u{fffd}'));
+}
+
+#[test]
+fn inspect_json_preserves_supported_unicode_input_paths() {
+    let root = TempDir::new().unwrap();
+    let input = root.path().join("sample-目录-🦀.assets");
+    fs::write(&input, serialized_text_assets()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_AssetStudioCLI"))
+        .arg(&input)
+        .args(["--operation", "inspect", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["assets"], 2);
+    assert_eq!(
+        std::path::Path::new(value["input"].as_str().unwrap()).file_name(),
+        input.file_name()
+    );
 }
 
 #[test]

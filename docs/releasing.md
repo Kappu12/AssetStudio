@@ -18,7 +18,7 @@ The reviewed Rust rewrite is merged into `main`. Releases require explicit
 authorization and a review of the compatibility and validation records;
 successful CI alone does not establish full parity with the former managed
 application or compatibility with every game. The first authorized Rust release
-is [v2.0.0-alpha.1](releases/v2.0.0-alpha.1.md), focused on Facepunch Rust.
+is [v2.0.0-alpha.2](releases/v2.0.0-alpha.2.md), focused on Facepunch Rust.
 
 When a release is explicitly authorized:
 

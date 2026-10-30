@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "assetstudio-cli"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "assetstudio-core",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "assetstudio-core"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "assetstudio-gui"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "assetstudio-core",

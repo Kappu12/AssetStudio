@@ -125,6 +125,7 @@ class PackageTests(Fixture):
             "docs/reviews/sweep2.md": "Independent source review.\n",
             "docs/reviews/sweep2-source-ledger.json": "{\"files\": []}\n",
             "crates/assetstudio-cli/README.md": "CLI usage.\n",
+            f"docs/releases/v{self.version}.md": "Versioned release notes.\n",
         }
         for name, contents in linked_documents.items():
             document = self.root / name

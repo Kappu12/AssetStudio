@@ -413,7 +413,7 @@ def make_package(
             "docs/reviews/sweep2.md", "docs/reviews/sweep2-source-ledger.json",
             "crates/assetstudio-cli/README.md",
             "docs/blender-bridge.md",
-            "docs/releases/v2.0.0-alpha.1.md",
+            f"docs/releases/v{version}.md",
         ):
             document = root / name
             if document.is_file():
