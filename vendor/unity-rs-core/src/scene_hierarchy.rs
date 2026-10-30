@@ -7,7 +7,7 @@
 //! callers recurse the tree.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 use crate::loader::AssetCollection;
@@ -190,6 +190,135 @@ pub fn build_scene_hierarchy(
         .ok_or_else(|| Error::invalid_data("scene hierarchy index byte budget was exceeded"))?;
     drop(state);
     finish_hierarchy(nodes, limits.maximum_hierarchy_edges, remaining_index_bytes)
+}
+
+/// Reads selected GameObject subtrees and their ancestor, skin-bone and static
+/// batch dependencies. Unrelated objects consume neither the node budget nor
+/// binary-reader work. Dependency ancestors do not pull in their other children.
+pub fn build_scene_hierarchy_for_roots(
+    collection: &AssetCollection,
+    roots: &[SceneObjectKey],
+    limits: SceneHierarchyLimits,
+) -> Result<SceneHierarchy> {
+    let mut nodes = Vec::<SceneHierarchyNode>::new();
+    let mut by_object = HashMap::<SceneObjectKey, usize>::new();
+    let mut expanded = HashSet::new();
+    let mut pending = Vec::new();
+    if roots.len() > limits.maximum_game_objects {
+        return Err(Error::invalid_data(
+            "selected scene root count exceeds node limit",
+        ));
+    }
+    pending
+        .try_reserve(roots.len())
+        .map_err(|_| Error::invalid_data("cannot allocate selected scene roots"))?;
+    pending.extend(roots.iter().copied().map(|root| (root, true)));
+    let mut state = SceneBuildState::default();
+    while let Some((key, descendants)) = pending.pop() {
+        let index = if let Some(&index) = by_object.get(&key) {
+            index
+        } else {
+            if nodes.len() >= limits.maximum_game_objects {
+                return Err(Error::invalid_data(
+                    "selected scene exceeds GameObject limit",
+                ));
+            }
+            let target = try_resolve_target(
+                collection,
+                key.file_index,
+                ObjectReference {
+                    file_id: 0,
+                    path_id: key.path_id,
+                },
+            )
+            .filter(|target| target.object.class_id == GAME_OBJECT_CLASS_ID)
+            .ok_or_else(|| {
+                Error::invalid_data("selected scene root or dependency is not a loaded GameObject")
+            })?;
+            let node = read_scene_node(
+                collection,
+                target.file_index,
+                target.object_index,
+                limits,
+                &mut state,
+            )?;
+            let index = nodes.len();
+            by_object
+                .try_reserve(1)
+                .map_err(|_| Error::invalid_data("cannot allocate selected scene index"))?;
+            nodes
+                .try_reserve(1)
+                .map_err(|_| Error::invalid_data("cannot allocate selected scene nodes"))?;
+            by_object.insert(key, index);
+            nodes.push(node);
+            let node = &nodes[index];
+            enqueue_scene_dependency(&mut pending, node.parent, false, limits)?;
+            if let Some(batch) = node
+                .mesh_renderer
+                .as_ref()
+                .and_then(|renderer| renderer.static_batch)
+            {
+                enqueue_scene_dependency(&mut pending, batch.root, false, limits)?;
+            }
+            if let Some(renderer) = &node.skinned_mesh_renderer {
+                for &bone in &renderer.bones {
+                    let owner = resolve_transform_owner(collection, bone, limits, &mut state)?;
+                    enqueue_scene_dependency(&mut pending, owner, false, limits)?;
+                }
+            }
+            index
+        };
+        let auxiliary_bytes = nodes
+            .len()
+            .checked_mul(size_of::<SceneObjectKey>() * 8)
+            .ok_or_else(|| Error::invalid_data("selected scene index size overflow"))?;
+        if auxiliary_bytes > limits.maximum_index_bytes {
+            return Err(Error::invalid_data(
+                "selected scene indexes exceed byte limit",
+            ));
+        }
+        if descendants && !expanded.contains(&key) {
+            expanded
+                .try_reserve(1)
+                .map_err(|_| Error::invalid_data("cannot allocate selected scene traversal"))?;
+            expanded.insert(key);
+            if let Some(transform) = &nodes[index].transform {
+                for &child in &transform.declared_children {
+                    let owner = resolve_transform_owner(collection, child, limits, &mut state)?;
+                    enqueue_scene_dependency(&mut pending, owner, true, limits)?;
+                }
+            }
+        }
+    }
+    let remaining = limits
+        .maximum_index_bytes
+        .checked_sub(state.index_bytes)
+        .and_then(|bytes| bytes.checked_sub(nodes.len() * size_of::<SceneObjectKey>() * 8))
+        .ok_or_else(|| Error::invalid_data("selected scene index byte budget was exceeded"))?;
+    drop(state);
+    drop(by_object);
+    drop(expanded);
+    finish_hierarchy(nodes, limits.maximum_hierarchy_edges, remaining)
+}
+
+fn enqueue_scene_dependency(
+    pending: &mut Vec<(SceneObjectKey, bool)>,
+    key: Option<SceneObjectKey>,
+    descendants: bool,
+    limits: SceneHierarchyLimits,
+) -> Result<()> {
+    if let Some(key) = key {
+        if pending.len() >= limits.maximum_game_objects.saturating_mul(8) {
+            return Err(Error::invalid_data(
+                "selected scene pending dependencies exceed limit",
+            ));
+        }
+        pending
+            .try_reserve(1)
+            .map_err(|_| Error::invalid_data("cannot allocate selected scene dependency"))?;
+        pending.push((key, descendants));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -725,13 +854,60 @@ mod tests {
 
     use super::{
         SceneBuildState, SceneHierarchyLimits, SceneHierarchyNode, SceneObjectKey,
-        build_node_index, build_scene_hierarchy, find_node_index_by, insert_transform_owner,
+        build_node_index, build_scene_hierarchy, build_scene_hierarchy_for_roots,
+        find_node_index_by, insert_transform_owner,
     };
 
     const NULL: ObjectReference = ObjectReference {
         file_id: 0,
         path_id: 0,
     };
+
+    #[test]
+    fn selected_hierarchies_keep_ancestors_and_bones_without_unrelated_subtrees() {
+        let collection = model_fixture();
+        let selected = build_scene_hierarchy_for_roots(
+            &collection,
+            &[key(0, 1)],
+            SceneHierarchyLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.nodes.len(), 3);
+        assert_eq!(selected.node(key(0, 1)).unwrap().parent, Some(key(0, 2)));
+        assert!(selected.node(key(0, 3)).is_some());
+        let bone = build_scene_hierarchy_for_roots(
+            &collection,
+            &[key(0, 3)],
+            SceneHierarchyLimits {
+                maximum_game_objects: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bone.nodes.len(), 1);
+        assert!(
+            build_scene_hierarchy_for_roots(
+                &collection,
+                &[key(0, 1)],
+                SceneHierarchyLimits {
+                    maximum_game_objects: 2,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            build_scene_hierarchy_for_roots(
+                &collection,
+                &[key(0, 1)],
+                SceneHierarchyLimits {
+                    maximum_index_bytes: 1,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn assembles_v22_model_bindings_with_last_wins_and_try_get_semantics() {
@@ -869,6 +1045,12 @@ mod tests {
         )]);
         let error = build_scene_hierarchy(&cycle, SceneHierarchyLimits::default()).unwrap_err();
         assert!(error.to_string().contains("cycle"));
+        assert!(
+            build_scene_hierarchy_for_roots(&cycle, &[key(0, 1)], SceneHierarchyLimits::default())
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
 
         let corrupt = collection(vec![(
             "corrupt.assets",
@@ -885,6 +1067,14 @@ mod tests {
             ),
         )]);
         assert!(build_scene_hierarchy(&corrupt, SceneHierarchyLimits::default()).is_err());
+        assert!(
+            build_scene_hierarchy_for_roots(
+                &corrupt,
+                &[key(0, 1)],
+                SceneHierarchyLimits::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

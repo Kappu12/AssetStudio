@@ -63,6 +63,7 @@
 #*.RTF   diff=astextplain
 
 # Preserve exact upstream legal-text bytes, including their whitespace.
-packaging/licenses/** -whitespace
-vendor/unity-rs-core/THIRD_PARTY_LICENSES.txt -whitespace
+# License provenance hashes cover the original bytes, not CRLF-translated text.
+packaging/licenses/** -text -whitespace
+vendor/unity-rs-core/THIRD_PARTY_LICENSES.txt -text -whitespace
 crates/assetstudio-core/tests/fixtures/endfield-oracle/*.bin binary

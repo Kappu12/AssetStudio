@@ -940,7 +940,11 @@ fn convert_muscle_clip_with_acl(
     convert_streamed_frames(context, &words, following_curve_offset, total_sample_values)?;
 
     let stream_count = usize::try_from(clip.streamed.curve_count)
-        .map_err(|_| Error::invalid_data("streamed animation curve count does not fit usize"))?;
+        .ok()
+        .and_then(|count| {
+            count.checked_add(usize::from(clip.streamed.discrete_curve_count.unwrap_or(0)))
+        })
+        .ok_or_else(|| Error::invalid_data("streamed animation curve count does not fit usize"))?;
     let dense_offset = following_curve_offset
         .checked_add(stream_count)
         .ok_or_else(|| Error::invalid_data("dense animation curve offset overflowed"))?;

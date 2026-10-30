@@ -110,3 +110,16 @@ ignored), strict workspace Clippy, 58 focused game units and four game Session
 integrations. Its optimized CLI and actual Endfield profile probe passed; its
 optimized GUI still needs a fresh target build after cross-checkout ThinLTO
 cache corruption. See [local Codex handoff](LOCAL_CODEX_HANDOFF.md).
+
+## Local Windows / Facepunch Rust continuation
+
+The user prioritized the Facepunch Rust workflow; the other specialized-profile
+ports remain deferred. See [Facepunch Rust usage and acceptance](facepunch-rust.md)
+and the newest [feature evidence](feature-parity.md). Local checkpoints include
+550e0e7 (Windows checks) and afa4382 (registered legacy ACL/BH3Pre, root motion
+and catalog capacity). Later fixes cover actual Rust streamed clips, selected
+model hierarchy scopes, real portable ZIP licensing and end-to-end Blender import.
+The full 53.6 GB corpus loads 6,591,789 objects without diagnostics. The camper
+model exports without failures and imports into Blender with all ten referenced
+images present. Final Windows workspace validation passes 1,009 tests with 14
+optional external tests ignored. No branch push, tag or release was requested.

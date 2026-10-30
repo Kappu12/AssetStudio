@@ -9,6 +9,8 @@ replacement for every game-specific path in the original fork. See
 [feature parity](docs/feature-parity.md),
 [game compatibility](docs/game-compatibility.md), and
 [the migration record](docs/rust-rewrite.md) for implementation and evidence.
+For the supplied game corpus, follow the [Facepunch Rust workflow](docs/facepunch-rust.md).
+
 The original implementation remains in this branch as a reference while its
 remaining compatibility paths are ported; only the Cargo workspace is built and
 packaged by the Rust workflow.

@@ -89,3 +89,21 @@ to their animation owner. Seed-keyed bundle headers, pack-key blocks and the
 half-resolution renderer flag are supported by the application adapter. Full/fixed
 selectors, SR and database formats remain unsupported. Unix-only extraction test
 imports are gated for strict Windows linting.
+
+## Facepunch Rust collection and animation fixes
+
+Selected hierarchy reading follows only requested GameObject descendants plus
+ancestors, skin-bone owners and static-batch roots. Pending traversal, node,
+component/reference and index-byte limits remain bounded; cycles and corrupt
+selected components remain errors. The application uses this path for model
+preview, selected export and model animation graphs. Model animation dense and
+constant offsets include discrete streamed curves. Application-side `.anim`
+expansion additionally accepts terminal-only empty streams and minimum-finite
+slope sentinels, validates discrete step coefficients and deduplicates property
+tree scans by serialized type. See the root feature table for real-corpus and
+independent Blender import evidence.
+
+Windows checkout attributes preserve exact vendored legal/provenance bytes so
+real dependency-license SHA-256 checks survive core.autocrlf. The actual portable
+Windows ZIP, its PE imports, source/license inventory and extracted native smoke
+checks passed locally after that correction.

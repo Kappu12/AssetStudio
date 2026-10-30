@@ -559,6 +559,7 @@ fn type_tree_property(
     let mut result = None;
     let mut work = 0usize;
     for loaded in session.studio.collection().serialized_files() {
+        let mut visited_types = std::collections::HashSet::new();
         for (index, object) in loaded
             .file
             .objects
@@ -566,7 +567,18 @@ fn type_tree_property(
             .enumerate()
             .filter(|(_, object)| object.class_id == binding.type_id)
         {
-            let _ = object;
+            let Some(type_index) = object.serialized_type_index else {
+                continue;
+            };
+            if visited_types.contains(&type_index) {
+                continue;
+            }
+            ensure!(
+                visited_types.len() < 100_000,
+                "animation property type count exceeds its limit"
+            );
+            visited_types.try_reserve(1)?;
+            visited_types.insert(type_index);
             let Ok(tree) = loaded.file.object_type_tree(index) else {
                 continue;
             };

@@ -8,7 +8,7 @@ acceptance check are separate kinds of evidence.
 | Area | Rust implementation and evidence | Remaining limits |
 | --- | --- | --- |
 | Loading | Shared file/folder sessions, multi-input loading, split files, dependencies, UnityFS/Web/Raw/WebData and backend compression readers. Acceptance tests construct serialized v17/v22 files in both byte orders and plain/LZ4 UnityFS with streamed resources. | No representative real-game corpus was supplied. Not every backend format/codec has an application acceptance fixture. |
-| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Catalog limits default to one million objects and can be raised explicitly to ten million through GUI settings or `--max-assets`; related name/index/text budgets scale with that choice. Limits remain bounded. |
+| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Catalog capacity is configurable up to ten million objects (desktop default ten million, CLI default one million); related name/index/container/text budgets scale with that choice. Limits remain bounded. |
 | Text and data | TextAsset, raw object bytes, type-tree Dump/JSON, stripped MonoBehaviour schemas and MiHoYoBinData XOR. Integration tests check exact exported bytes, actual parsed trees and malformed-input failures. | Generic type-tree output requires a valid embedded or recovered schema. A raw fallback is not counted as decoded conversion. |
 | Images | Backend Texture2D/Sprite/atlas decoding and PNG/JPEG/BMP/TGA export; GUI image zoom, RGB channel toggles and alpha isolation. Unity 6000 inline and streamed texture fixtures check pixels and row orientation. | The backend's full texture-format/platform matrix has not been independently exercised here. |
 | Audio | Backend original-payload/WAV conversion; native streaming WAV playback with pause, stop, seek, volume and loop. Device-free tests check decoded samples, malformed headers, streaming seeks and actual sink state. | No physical audio output device was available. Proprietary codecs and every historical audio layout are not established as equivalent. |
@@ -68,3 +68,30 @@ passed. A fresh optimized GUI rebuild remains required; see the
 
 These checks supersede the old unresolved optimized-GUI build note for Windows.
 They do not establish macOS/hosted-CI execution or the ten rejected profiles.
+
+## Facepunch Rust acceptance on Windows
+
+The supplied unpacked corpus (168 files, 53,558,105,139 bytes) loaded with
+6,591,789 assets and no load diagnostics. It includes 1,561,420 GameObjects,
+56,733 meshes, 55,830 textures, 9,232 sprites, 5,212 clips and 10,557 audio clips.
+This is a specific local corpus result, not a claim about every Rust release.
+
+Real exports validated four PNGs (CRC/data/size checks), three nonempty WAVs
+(sample counts/rates), and three OBJ meshes (finite vertices and faces). A
+textured camper model exported 17 files with zero failures. Blender 5.3 imported
+the binary FBX as 78 mesh objects, 34,188 vertices and 30,374 polygons; three
+materials and ten file images loaded with no missing images.
+
+Corpus-driven fixes cover terminal-only streamed clips, minimum-finite slope
+sentinels, discrete streamed binding offsets, and repeated property-type scans.
+Selected model previews/exports now read their subtree plus ancestors, bones
+and static-batch dependencies instead of parsing every unrelated GameObject.
+A regression with 20,000 unrelated objects and a corrupt unrelated renderer
+checks the actual preview/export path; hierarchy budget and cycle checks remain.
+
+Final Windows checks: 1,009 Rust tests passed, 14 optional external checks ignored;
+35 Python tests passed with two symlink checks unavailable. Strict Clippy,
+formatting, workflow policy, optimized MSVC build and native smoke checks passed.
+Interactive desktop inspection could not start because computer-control approval
+timed out. Standalone `.anim` references still require Unity GUID metadata, and
+clip paths require their bound hierarchy/Avatar. See facepunch-rust.md for usage.

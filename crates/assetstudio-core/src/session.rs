@@ -607,10 +607,17 @@ impl Session {
         Ok(output.into_inner())
     }
 
+    pub(crate) fn scene_limits(&self) -> SceneHierarchyLimits {
+        SceneHierarchyLimits {
+            maximum_game_objects: self.maximum_assets,
+            maximum_hierarchy_edges: self.maximum_assets,
+            maximum_index_bytes: self.maximum_catalog_text_bytes,
+            ..Default::default()
+        }
+    }
+
     pub fn scene(&self) -> Result<Vec<SceneNode>> {
-        let hierarchy = self
-            .studio
-            .scene_hierarchy(SceneHierarchyLimits::default())?;
+        let hierarchy = self.studio.scene_hierarchy(self.scene_limits())?;
         Ok(hierarchy
             .nodes
             .into_iter()
@@ -910,10 +917,12 @@ pub(crate) fn backend_options(options: &LoadOptions) -> Result<AssetLoadOptions>
         .maximum_container_assignments
         .max(options.maximum_assets.saturating_mul(4));
     limits.container_metadata.maximum_preload_references = limits
-        .container_metadata.maximum_preload_references
+        .container_metadata
+        .maximum_preload_references
         .max(options.maximum_assets.saturating_mul(4));
     limits.container_metadata.maximum_container_entries = limits
-        .container_metadata.maximum_container_entries
+        .container_metadata
+        .maximum_container_entries
         .max(options.maximum_assets);
     limits.container_metadata.maximum_total_string_bytes =
         catalog_text_budget(options.maximum_assets);

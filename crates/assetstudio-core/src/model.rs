@@ -18,7 +18,7 @@ use unity_rs_core::{
     model_animation::{ModelAnimationLimits, build_model_animations},
     model_ir::{ModelIr, ModelIrLimits, build_model_ir, build_model_ir_for_game_object},
     obj_scene::{write_model_ir_mtl, write_model_ir_obj},
-    scene_hierarchy::{SceneHierarchyLimits, SceneObjectKey},
+    scene_hierarchy::{SceneObjectKey, build_scene_hierarchy_for_roots},
     scene_textures::{SceneTextureLimits, SceneTextureSet},
 };
 
@@ -69,9 +69,19 @@ impl Session {
             bail!("model root count exceeds catalog limit");
         }
         let destination = SafeOutput::new(output)?;
-        let mut hierarchy = self
-            .studio
-            .scene_hierarchy(SceneHierarchyLimits::default())?;
+        let selected_roots = roots
+            .iter()
+            .filter_map(|&root| resolve_model_root(self, root).ok())
+            .collect::<Vec<_>>();
+        let mut hierarchy = if roots.is_empty() {
+            self.studio.scene_hierarchy(self.scene_limits())?
+        } else {
+            build_scene_hierarchy_for_roots(
+                self.studio.collection(),
+                &selected_roots,
+                self.scene_limits(),
+            )?
+        };
         // Disabled materials must not require their binary layouts or texture
         // dependencies to parse successfully during model construction.
         if !options.include_materials {
@@ -110,23 +120,14 @@ impl Session {
                 if !seen.insert(root) {
                     continue;
                 }
-                let selected = SceneObjectKey {
-                    file_index: root.file_index,
-                    path_id: root.path_id,
-                };
-                let selected = if self.object(root)?.class_id() == 95 {
-                    hierarchy
-                        .nodes
-                        .iter()
-                        .find(|node| {
-                            node.animator
-                                .as_ref()
-                                .is_some_and(|animator| animator.component == selected)
-                        })
-                        .map(|node| node.object)
-                        .context("selected Animator has no resolved GameObject")?
-                } else {
-                    selected
+                let selected = match resolve_model_root(self, root) {
+                    Ok(selected) => selected,
+                    Err(error) => {
+                        report
+                            .failed
+                            .push(format!("selected root {root:?}: {error:#}"));
+                        continue;
+                    }
                 };
                 let Some(node) = hierarchy.node(selected) else {
                     report.failed.push(format!(
@@ -239,7 +240,7 @@ impl Session {
                 let animations = if budget.options.include_animations {
                     let graph = build_animation_graph(
                         self.studio.collection(),
-                        &hierarchy_for_animation(self)?,
+                        &hierarchy_for_animation(self, &model)?,
                         AnimationGraphLimits::default(),
                     )?;
                     let mut animations = build_model_animations(
@@ -340,8 +341,56 @@ impl Session {
 
 fn hierarchy_for_animation(
     session: &Session,
+    model: &ModelIr,
 ) -> Result<unity_rs_core::scene_hierarchy::SceneHierarchy> {
-    Ok(session
-        .studio
-        .scene_hierarchy(SceneHierarchyLimits::default())?)
+    let roots: Vec<_> = model
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.export_content
+                && node
+                    .parent
+                    .and_then(|parent| model.node(parent))
+                    .is_none_or(|parent| !parent.export_content)
+        })
+        .map(|node| node.object)
+        .collect();
+    Ok(build_scene_hierarchy_for_roots(
+        session.studio.collection(),
+        &roots,
+        session.scene_limits(),
+    )?)
+}
+
+pub(crate) fn resolve_model_root(session: &Session, key: AssetKey) -> Result<SceneObjectKey> {
+    use unity_rs_core::scene::{SceneReadLimits, read_animator, resolve_object_reference};
+    use unity_rs_core::serialized::ObjectReference;
+    let collection = session.studio.collection();
+    let target = resolve_object_reference(
+        collection,
+        key.file_index,
+        ObjectReference {
+            file_id: 0,
+            path_id: key.path_id,
+        },
+    )?
+    .context("selected model root is not loaded")?;
+    let target = if target.object.class_id == 95 {
+        let animator = read_animator(target.file, target.object_index, SceneReadLimits::default())?;
+        resolve_object_reference(
+            collection,
+            target.file_index,
+            animator.behaviour.component.game_object,
+        )?
+        .context("selected Animator has no loaded GameObject")?
+    } else {
+        target
+    };
+    if target.object.class_id != 1 {
+        bail!("selected model root is not a GameObject or Animator");
+    }
+    Ok(SceneObjectKey {
+        file_index: target.file_index,
+        path_id: target.object.path_id,
+    })
 }

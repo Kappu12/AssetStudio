@@ -218,7 +218,7 @@ impl LoadSettings {
             xor_key,
             continue_on_error: self.continue_on_error,
             maximum_assets: if self.maximum_assets.trim().is_empty() {
-                1_000_000
+                10_000_000
             } else {
                 self.maximum_assets
                     .trim()
@@ -349,6 +349,7 @@ impl StudioApp {
             model_options: ModelExportOptions::default(),
             load_settings: LoadSettings {
                 game: "Normal".to_owned(),
+                maximum_assets: "10000000".to_owned(),
                 ..Default::default()
             },
             unity_cn_names: Vec::new(),
@@ -453,7 +454,15 @@ impl StudioApp {
             ("cab_map", &mut settings.cab_map),
             ("cab_base", &mut settings.cab_base),
         ] {
-            *target = preference_string(load, name, if name == "game" { "Normal" } else { "" })?;
+            *target = preference_string(
+                load,
+                name,
+                match name {
+                    "game" => "Normal",
+                    "maximum_assets" => "10000000",
+                    _ => "",
+                },
+            )?;
         }
         settings.continue_on_error = preference_bool(load, "continue_on_error", false)?;
         settings.unity_cn_key_index = match load.get("unity_cn_key_index") {
@@ -2590,7 +2599,7 @@ impl StudioApp {
                     }
                 });
                 ui.end_row();
-                ui.label("Maximum catalog assets"); ui.add(TextEdit::singleline(&mut self.load_settings.maximum_assets).hint_text("1000000 (up to 10000000)")); ui.end_row();
+                ui.label("Maximum catalog assets"); ui.add(TextEdit::singleline(&mut self.load_settings.maximum_assets).hint_text("10000000 (1 to 10000000)")); ui.end_row();
                 ui.label("Unity version override"); ui.add(TextEdit::singleline(&mut self.load_settings.unity_version).hint_text("Use the version stored in the file")); ui.end_row();
                 ui.label("UnityCN key file");
                 ui.horizontal(|ui| {

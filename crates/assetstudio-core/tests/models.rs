@@ -951,6 +951,54 @@ fn packed_quaternion_and_euler_root_tracks_reach_real_fbx_curves() {
 }
 
 #[test]
+fn selected_models_ignore_unrelated_catalog_size_and_malformed_renderers() {
+    let mut objects = vec![
+        (1, 1, model_game_object(&[11, 21, 31])),
+        (4, 11, model_transform()),
+        (33, 21, model_mesh_filter()),
+        (23, 31, model_renderer()),
+        (43, 51, model_mesh()),
+        (21, 61, material_object()),
+        (28, 71, texture_object("color", &[255, 0, 0, 255])),
+    ];
+    for id in 10_000..30_000 {
+        objects.push((1, id, model_game_object(&[])));
+    }
+    objects.push((1, 90_000, model_game_object(&[90_001])));
+    let mut broken_renderer = Vec::new();
+    push_pptr(&mut broken_renderer, 90_000);
+    objects.push((23, 90_001, broken_renderer));
+    let session = Session::from_regions(
+        [(
+            "large-collection".into(),
+            Region::from_bytes(objects_file(&objects)),
+        )],
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let root = AssetKey {
+        file_index: 0,
+        path_id: 1,
+    };
+    let Preview::Mesh {
+        vertices, indices, ..
+    } = session.preview(root).unwrap()
+    else {
+        panic!("expected model");
+    };
+    assert_eq!(vertices[0], [2.0, 3.0, 4.0]);
+    assert_eq!(indices.len(), 3);
+    let output = tempfile::tempdir().unwrap();
+    let report = session
+        .export_scene(output.path(), ModelFormat::FbxBinary, &[root])
+        .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(!report.written.is_empty());
+    // The complete-scene operation still reports corrupt geometry in its scope.
+    assert!(session.scene().is_err());
+}
+
+#[test]
 fn game_object_and_animator_static_previews_use_world_geometry_without_animations() {
     let mut broken = Vec::new();
     push_aligned_string(&mut broken, "Broken Clip");

@@ -15,6 +15,7 @@ struct Binding {
 struct Clip {
     words: Vec<u32>,
     stream: u16,
+    discrete: u16,
     dense: Vec<f32>,
     dense_width: u32,
     frames: u32,
@@ -29,6 +30,7 @@ impl Clip {
         Self {
             words: Vec::new(),
             stream: 0,
+            discrete: 0,
             dense: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             dense_width: 3,
             frames: 2,
@@ -110,7 +112,7 @@ fn clip_bytes(clip: &Clip) -> Vec<u8> {
         u32v(&mut out, word);
     }
     out.extend_from_slice(&clip.stream.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&clip.discrete.to_le_bytes());
     u32v(&mut out, clip.frames);
     u32v(&mut out, clip.dense_width);
     floats(&mut out, &[clip.rate, clip.begin]);
@@ -303,6 +305,47 @@ fn modern_dense_streamed_and_constant_curves_export_real_unmirrored_yaml_samples
         fs::write(folder.join("Modern.anim"), text).unwrap();
         fs::write(folder.join("modern.assets"), bytes).unwrap();
     }
+}
+
+#[test]
+fn terminal_only_streams_preserve_dense_curves() {
+    let mut clip = Clip::dense_root();
+    clip.words = vec![f32::INFINITY.to_bits(), 0];
+    let text = export(&session(serialized(&[(74, 91, clip_bytes(&clip))]))).unwrap();
+    let positions = section(&text, "m_PositionCurves:", "m_ScaleCurves:");
+    assert!(positions.contains("x: 1\n"));
+    assert!(positions.contains("x: 4\n"));
+    clip.stream = 1;
+    assert!(export(&session(serialized(&[(74, 91, clip_bytes(&clip))]))).is_err());
+}
+
+#[test]
+fn discrete_streams_use_minimum_finite_sentinel_and_offset_following_dense_curves() {
+    let mut clip = Clip::dense_root();
+    clip.discrete = 1;
+    clip.bindings.insert(
+        0,
+        Binding {
+            path: 0,
+            attribute: 0,
+            class: 212,
+            custom: 23,
+            pptr: 1,
+        },
+    );
+    clip.mapping = vec![0, 0];
+    streamed_frame(&mut clip.words, f32::MIN, &[0.0]);
+    streamed_frame(&mut clip.words, 0.0, &[0.0]);
+    streamed_frame(&mut clip.words, 1.0, &[1.0]);
+    streamed_frame(&mut clip.words, f32::INFINITY, &[]);
+    let text = export(&session(serialized(&[(74, 91, clip_bytes(&clip))]))).unwrap();
+    let pointers = section(&text, "m_PPtrCurves:", "m_SampleRate:");
+    assert!(pointers.contains("m_Sprite"));
+    assert!(pointers.contains("time: 1\n"));
+    assert_eq!(pointers.matches("fileID: 0").count(), 3); // Two values and the null script.
+    let positions = section(&text, "m_PositionCurves:", "m_ScaleCurves:");
+    assert!(positions.contains("x: 1\n"));
+    assert!(positions.contains("x: 4\n"));
 }
 
 #[test]

@@ -121,10 +121,6 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
     {
         return Ok(());
     }
-    ensure!(
-        data.streamed.discrete_curve_count.unwrap_or(0) == 0,
-        "standalone .anim separate discrete streamed-curve layout is not verified"
-    );
     let spans = spans(&clip.binding_constant.generic_bindings)?;
     let total = spans.last().map_or(0, |span| span.start + span.width);
     ensure!(
@@ -174,7 +170,10 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
     let acl_count = decoded_mhy
         .as_ref()
         .map_or(0, |acl| acl.following_curve_offset as usize);
-    let stream_count = usize::try_from(data.streamed.curve_count)?;
+    let continuous_count = usize::try_from(data.streamed.curve_count)?;
+    let stream_count = continuous_count
+        .checked_add(usize::from(data.streamed.discrete_curve_count.unwrap_or(0)))
+        .context("streamed animation curve count overflow")?;
     let dense_count = usize::try_from(data.dense.curve_count)?;
     let dense_start = acl_count
         .checked_add(stream_count)
@@ -208,7 +207,13 @@ pub(super) fn expand(session: &Session, key: AssetKey, clip: &mut AnimationClip)
         }
     }
     let words = data.streamed.data.read_values(MAX_STREAM_WORDS)?;
-    streamed_at(&words, stream_count, acl_count, &mut samples)?;
+    streamed_at(
+        &words,
+        stream_count,
+        continuous_count,
+        acl_count,
+        &mut samples,
+    )?;
     let dense = &data.dense;
     let dense_size = dense
         .frame_count
@@ -332,12 +337,13 @@ struct PolynomialKey {
 
 #[cfg(test)]
 fn streamed(words: &[u32], curve_count: usize, output: &mut Samples) -> Result<()> {
-    streamed_at(words, curve_count, 0, output)
+    streamed_at(words, curve_count, curve_count, 0, output)
 }
 
 fn streamed_at(
     words: &[u32],
     curve_count: usize,
+    continuous_count: usize,
     binding_offset: usize,
     output: &mut Samples,
 ) -> Result<()> {
@@ -350,6 +356,11 @@ fn streamed_at(
             curve_count == 0,
             "streamed animation declares curves without frames"
         );
+        return Ok(());
+    }
+    // Unity also emits a terminal-only stream when all curves are dense or
+    // constant. It carries no slope frame and declares no streamed curves.
+    if curve_count == 0 && words == [f32::INFINITY.to_bits(), 0] {
         return Ok(());
     }
     let mut cursor = 0usize;
@@ -382,7 +393,7 @@ fn streamed_at(
         );
         if frame == 0 {
             ensure!(
-                time == f32::NEG_INFINITY,
+                time == f32::NEG_INFINITY || time == f32::MIN,
                 "streamed animation needs its initial slope sentinel"
             );
         } else {
@@ -421,13 +432,18 @@ fn streamed_at(
                 value.is_finite() && coeff.iter().all(|v| v.is_finite()),
                 "streamed animation polynomial is non-finite"
             );
+            let discrete = index >= continuous_count;
+            ensure!(
+                !discrete || coeff == [0.0; 3],
+                "discrete streamed curve has interpolation coefficients"
+            );
             if frame > 0 && !terminal {
                 let before = previous
                     .get(&index)
                     .context("streamed animation curve has no preceding slope key")?;
                 let incoming = if before.coeff == [0.0; 3] {
                     f32::INFINITY
-                } else if before.time == f32::NEG_INFINITY {
+                } else if before.time < 0.0 {
                     0.0
                 } else {
                     let dx = (time - before.time).max(0.0001);
@@ -448,7 +464,7 @@ fn streamed_at(
                         time,
                         value,
                         incoming,
-                        outgoing: coeff[2],
+                        outgoing: if discrete { f32::INFINITY } else { coeff[2] },
                     },
                 )?;
             }

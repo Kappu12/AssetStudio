@@ -19,10 +19,7 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NODES: usize = 16_384;
 
 pub(crate) fn preview_model(session: &Session, key: AssetKey) -> Result<Preview> {
-    let selected = SceneObjectKey {
-        file_index: key.file_index,
-        path_id: key.path_id,
-    };
+    let selected = crate::model::resolve_model_root(session, key)?;
     let class_id = session.object(key)?.class_id();
     ensure!(
         matches!(class_id, 1 | 95),
@@ -47,21 +44,11 @@ pub(crate) fn preview_model(session: &Session, key: AssetKey) -> Result<Preview>
     hierarchy_limits.renderer.maximum_bones = 4096;
     hierarchy_limits.renderer.maximum_blend_shape_weights = MAX_VERTICES;
     hierarchy_limits.renderer.maximum_reference_bytes = (MAX_BYTES / 4) as u64;
-    let mut hierarchy = session.studio.scene_hierarchy(hierarchy_limits)?;
-    let selected = if class_id == 95 {
-        hierarchy
-            .nodes
-            .iter()
-            .find(|node| {
-                node.animator
-                    .as_ref()
-                    .is_some_and(|animator| animator.component == selected)
-            })
-            .map(|node| node.object)
-            .context("Selected Animator has no resolved GameObject")?
-    } else {
-        selected
-    };
+    let mut hierarchy = unity_rs_core::scene_hierarchy::build_scene_hierarchy_for_roots(
+        session.studio.collection(),
+        &[selected],
+        hierarchy_limits,
+    )?;
     let (mesh_count, mesh_variant_count) = selected_mesh_count(&hierarchy, selected)?;
     ensure!(
         mesh_count != 0,
