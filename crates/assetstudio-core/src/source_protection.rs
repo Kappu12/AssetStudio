@@ -168,7 +168,26 @@ impl SourceProtection {
                 bail!("output is not a regular file: {target:?}")
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Windows canonicalization adds a verbatim prefix. Resolve the
+                // surviving parent so a deleted leaf retains the same spelling
+                // as the protected path, including aliases of its directory.
+                if let (Some(parent), Some(name)) = (target.parent(), target.file_name()) {
+                    let parent = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
+                    match fs::canonicalize(parent) {
+                        Ok(parent) if self.paths.contains(&parent.join(name)) => {
+                            bail!("refusing to re-create original input {target:?}");
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error).context("resolve output parent"),
+                    }
+                }
+            }
             Err(error) => return Err(error).context("inspect output file kind"),
         }
         match fs::canonicalize(target) {

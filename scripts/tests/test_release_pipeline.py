@@ -68,27 +68,27 @@ class Fixture(unittest.TestCase):
         self.build.mkdir(parents=True)
         self.backend = self.root / BACKEND_PATH
         self.backend.mkdir(parents=True)
-        (self.backend / "Cargo.toml").write_text('[package]\nname = "unity-rs-core"\nversion = "0.6.1"\n', encoding="utf-8")
+        (self.backend / "Cargo.toml").write_text('[package]\nname = "unity-rs-core"\nversion = "0.6.1"\n', encoding="utf-8", newline="")
         (self.backend / "src").mkdir()
-        (self.backend / "src/lib.rs").write_text("pub fn fixture() {}\n", encoding="utf-8")
+        (self.backend / "src/lib.rs").write_text("pub fn fixture() {}\n", encoding="utf-8", newline="")
         self.codec = self.root / "codec"
         self.codec.mkdir()
-        (self.codec / "LICENSE-MIT").write_text("Fixture codec MIT notice\n", encoding="utf-8")
+        (self.codec / "LICENSE-MIT").write_text("Fixture codec MIT notice\n", encoding="utf-8", newline="")
         self.set_version(self.version)
         for name in BINARIES:
             (self.build / name).write_bytes(fake_pe())
         for name in DOCUMENTS:
-            (self.root / name).write_text(f"Fixture document {name}\n", encoding="utf-8")
+            (self.root / name).write_text(f"Fixture document {name}\n", encoding="utf-8", newline="")
         for source in PACKAGE_RESOURCES.values():
             path = self.root / source
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("[]\n", encoding="utf-8")
+            path.write_text("[]\n", encoding="utf-8", newline="")
         for source in VENDORED_LICENSES.values():
             path = self.root / source
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("Fixture vendored source MIT notice\n", encoding="utf-8")
+            path.write_text("Fixture vendored source MIT notice\n", encoding="utf-8", newline="")
         for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS:
-            (self.backend / name).write_text(f"Backend legal document {name}\n", encoding="utf-8")
+            (self.backend / name).write_text(f"Backend legal document {name}\n", encoding="utf-8", newline="")
         self.metadata = {"packages": [
             {"name": "unity-rs-core", "version": "0.6.1", "manifest_path": str(self.backend / "Cargo.toml"),
              "license": "MIT", "source": None},
@@ -103,7 +103,7 @@ class Fixture(unittest.TestCase):
             '[workspace.dependencies]\nunity_rs_core = { package = "unity-rs-core", '
             'git = "https://github.com/seiunx-dev/unity-rs", rev = "' + "a" * 40 + '" }\n'
             '[patch."https://github.com/seiunx-dev/unity-rs"]\n'
-            f'unity-rs-core = {{ path = "{BACKEND_PATH}" }}\n', encoding="utf-8",
+            f'unity-rs-core = {{ path = "{BACKEND_PATH}" }}\n', encoding="utf-8", newline="",
         )
 
     def package(self) -> tuple[Path, Path]:
@@ -126,7 +126,7 @@ class PackageTests(Fixture):
         for name, contents in linked_documents.items():
             document = self.root / name
             document.parent.mkdir(parents=True, exist_ok=True)
-            document.write_text(contents, encoding="utf-8")
+            document.write_text(contents, encoding="utf-8", newline="")
         archive, checksum = self.package()
         inspect_zip(archive, self.version)
         self.assertEqual(checksum.read_text(), f"{sha256(archive)}  {archive.name}\n")
@@ -203,7 +203,7 @@ class PackageTests(Fixture):
             self.assertEqual(before["upstream"]["revision"], "a" * 40)
             self.assertEqual(before["source_tree_files"], 2)
             self.assertEqual(package.read(before["local_modifications"]), b"Backend legal document ASSETSTUDIO_PATCHES.md\n")
-        (self.backend / "src/lib.rs").write_text("pub fn changed_fixture() {}\n", encoding="utf-8")
+        (self.backend / "src/lib.rs").write_text("pub fn changed_fixture() {}\n", encoding="utf-8", newline="")
         archive, _ = self.package()
         with zipfile.ZipFile(archive) as package:
             changed_code = next(p for p in json.loads(package.read("dependency-inventory.json")) if p["name"] == "unity-rs-core")
@@ -225,7 +225,7 @@ class PackageTests(Fixture):
             original.replace(f'path = "{BACKEND_PATH}"', 'path = "other-reader"'),
             original.replace("a" * 40, "main"),
         ):
-            manifest.write_text(changed, encoding="utf-8")
+            manifest.write_text(changed, encoding="utf-8", newline="")
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 self.package()
             self.assertFalse((self.root / "dist").exists())

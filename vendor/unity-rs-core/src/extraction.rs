@@ -2406,11 +2406,13 @@ mod tests {
         ClaimKind, ExtractionLimits, ExtractionOptions, ExtractionPathBudget, Extractor,
         MAX_PORTABLE_COMPONENT_BYTES, PersistOutcome, TemporaryFile, decoded_leaf_path,
         ensure_secure_directory, extract_path, extract_region, extraction_backup_path,
-        filesystem_path_label, format_extraction_error, join_relative_path_fallibly,
-        lexical_absolute, nearest_existing_ancestor, nested_label, path_from_components,
-        portable_key, sanitize_component, sanitize_filesystem_relative_path, sanitize_os_component,
-        suffixed_component, suffixed_path,
+        format_extraction_error, join_relative_path_fallibly, lexical_absolute,
+        nearest_existing_ancestor, nested_label, path_from_components, portable_key,
+        sanitize_component, suffixed_component, suffixed_path,
     };
+
+    #[cfg(unix)]
+    use super::{filesystem_path_label, sanitize_filesystem_relative_path, sanitize_os_component};
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
