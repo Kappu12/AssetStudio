@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +29,7 @@ pub(crate) const MAX_EXPORT_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 #[derive(Debug)]
 pub struct Session {
     pub(crate) studio: Studio,
-    assets: Vec<AssetRecord>,
+    assets: Arc<Vec<AssetRecord>>,
     by_key: HashMap<AssetKey, usize>,
     diagnostics: Vec<String>,
     warnings: Vec<String>,
@@ -319,7 +320,7 @@ impl Session {
             .collect();
         let mut session = Self {
             studio,
-            assets,
+            assets: Arc::new(assets),
             by_key,
             diagnostics,
             warnings: Vec::new(),
@@ -342,6 +343,12 @@ impl Session {
 
     pub fn assets(&self) -> &[AssetRecord] {
         &self.assets
+    }
+
+    /// Cheap immutable browser snapshot. Later metadata recovery uses copy on
+    /// write so an existing snapshot remains internally consistent.
+    pub fn shared_assets(&self) -> Arc<Vec<AssetRecord>> {
+        self.assets.clone()
     }
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
@@ -374,7 +381,8 @@ impl Session {
 
     pub fn recover_containers(&mut self, index_path: &Path) -> Result<usize> {
         self.protect_input_path(index_path)?;
-        crate::recovery::AssetIndex::from_path(index_path)?.apply(&mut self.assets)
+        crate::recovery::AssetIndex::from_path(index_path)?
+            .apply(Arc::make_mut(&mut self.assets).as_mut_slice())
     }
 
     fn resolve_index_metadata(&mut self) -> Result<()> {
@@ -416,7 +424,7 @@ impl Session {
                 if retained > self.maximum_catalog_text_bytes {
                     bail!("IndexObject metadata exceeds catalog byte limit");
                 }
-                self.assets[index].name = name;
+                Arc::make_mut(&mut self.assets)[index].name = name;
             }
             for entry in decoded.entries {
                 let reference = unity_rs_core::serialized::ObjectReference {
@@ -463,8 +471,9 @@ impl Session {
                 if retained > self.maximum_catalog_text_bytes {
                     bail!("IndexObject metadata exceeds catalog byte limit");
                 }
-                self.assets[index].container = container;
-                self.assets[index].name = name;
+                let assets = Arc::make_mut(&mut self.assets);
+                assets[index].container = container;
+                assets[index].name = name;
             }
         }
         Ok(())
@@ -658,22 +667,22 @@ impl Session {
     }
 
     pub fn scene(&self) -> Result<Vec<SceneNode>> {
-        let hierarchy = self.studio.scene_hierarchy(self.scene_limits())?;
-        Ok(hierarchy
-            .nodes
-            .into_iter()
-            .map(|node| SceneNode {
-                key: AssetKey {
-                    file_index: node.object.file_index,
-                    path_id: node.object.path_id,
-                },
-                name: node.name,
-                parent: node.parent.map(|parent| AssetKey {
-                    file_index: parent.file_index,
-                    path_id: parent.path_id,
-                }),
-            })
-            .collect())
+        Ok(scene_nodes(
+            self.studio.scene_hierarchy(self.scene_limits())?,
+        ))
+    }
+
+    /// Browser topology only; model conversion retains the complete scene reader.
+    pub fn scene_outline_with_progress(
+        &self,
+        progress: Option<&crate::ProgressObserver>,
+    ) -> Result<Vec<SceneNode>> {
+        let hierarchy = unity_rs_core::scene_hierarchy::build_scene_outline(
+            self.studio.collection(),
+            self.scene_limits(),
+            progress,
+        )?;
+        Ok(scene_nodes(hierarchy))
     }
 
     pub fn extract_paths(
@@ -1018,9 +1027,71 @@ pub(crate) fn report_progress(
     }
 }
 
+fn scene_nodes(hierarchy: unity_rs_core::scene_hierarchy::SceneHierarchy) -> Vec<SceneNode> {
+    hierarchy
+        .nodes
+        .into_iter()
+        .map(|node| SceneNode {
+            key: AssetKey {
+                file_index: node.object.file_index,
+                path_id: node.object.path_id,
+            },
+            name: node.name,
+            parent: node.parent.map(|parent| AssetKey {
+                file_index: parent.file_index,
+                path_id: parent.path_id,
+            }),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires ASSETSTUDIO_PERF_INPUT pointing to local Unity assets"]
+    fn real_hierarchy_performance() {
+        let path = PathBuf::from(
+            std::env::var_os("ASSETSTUDIO_PERF_INPUT").expect("set ASSETSTUDIO_PERF_INPUT"),
+        );
+        let session = Session::open(
+            &path,
+            &LoadOptions {
+                maximum_assets: 10_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let now = std::time::Instant::now();
+        let full = session
+            .studio
+            .scene_hierarchy(session.scene_limits())
+            .unwrap();
+        println!(
+            "Model hierarchy {} nodes: {:?}",
+            full.nodes.len(),
+            now.elapsed()
+        );
+        let now = std::time::Instant::now();
+        let outline = session.scene_outline_with_progress(None).unwrap();
+        println!(
+            "Browser hierarchy {} nodes: {:?}",
+            outline.len(),
+            now.elapsed()
+        );
+        assert_eq!(full.nodes.len(), outline.len());
+        for (a, b) in full.nodes.iter().zip(outline) {
+            assert_eq!(
+                (a.object.file_index, a.object.path_id, &a.name),
+                (b.key.file_index, b.key.path_id, &b.name)
+            );
+            assert_eq!(
+                a.parent.map(|p| (p.file_index, p.path_id)),
+                b.parent.map(|p| (p.file_index, p.path_id))
+            );
+        }
+    }
     #[test]
     fn session_can_be_shared_with_ui_worker() {
         fn assert_send_sync<T: Send + Sync>() {}

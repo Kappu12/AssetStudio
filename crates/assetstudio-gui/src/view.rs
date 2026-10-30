@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use assetstudio_core::{AssetFilter, AssetKey, AssetRecord};
@@ -18,7 +18,7 @@ pub enum SortColumn {
 pub struct Filters {
     pub name: String,
     pub container: String,
-    pub class: Option<String>,
+    pub classes: BTreeSet<String>,
     pub regex: bool,
 }
 
@@ -26,84 +26,186 @@ pub struct Catalog {
     pub assets: Arc<Vec<AssetRecord>>,
     pub classes: BTreeMap<String, usize>,
     pub by_key: HashMap<AssetKey, usize>,
+    pub rows: Arc<RowIndex>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum TypeSort {
+    #[default]
+    Alphabetical,
+    Most,
+    Least,
+}
+
+impl TypeSort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Alphabetical => "A",
+            Self::Most => "↓",
+            Self::Least => "↑",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Alphabetical => Self::Most,
+            Self::Most => Self::Least,
+            Self::Least => Self::Alphabetical,
+        }
+    }
+
+    pub fn rows<'a>(
+        self,
+        classes: &'a BTreeMap<String, usize>,
+        query: &str,
+    ) -> Vec<(&'a str, usize)> {
+        let query = query.trim().to_ascii_lowercase();
+        let mut rows: Vec<_> = classes
+            .iter()
+            .filter(|(name, _)| name.to_ascii_lowercase().contains(&query))
+            .map(|(name, &count)| (name.as_str(), count))
+            .collect();
+        match self {
+            Self::Alphabetical => {}
+            Self::Most => rows.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0))),
+            Self::Least => rows.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0))),
+        }
+        rows
+    }
+}
+
+/// Immutable ordering shared by filter jobs. Type buckets contain name-order
+/// ranks, so filtering a small type never scans or re-sorts the whole catalog.
+#[derive(Default)]
+pub struct RowIndex {
+    names: Vec<usize>,
+    types: BTreeMap<String, Vec<usize>>,
+}
+
+impl RowIndex {
+    fn prepare(assets: &[AssetRecord]) -> Result<Self, String> {
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(assets.len())
+            .map_err(|error| error.to_string())?;
+        names.extend(0..assets.len());
+        names.sort_unstable_by(|&a, &b| compare_rows(assets, a, b, SortColumn::Name));
+        let mut types = BTreeMap::<String, Vec<usize>>::new();
+        for (rank, &index) in names.iter().enumerate() {
+            let class = &assets[index].class_name;
+            if !types.contains_key(class) {
+                types.insert(class.clone(), Vec::new());
+            }
+            let rows = types.get_mut(class).expect("type bucket was inserted");
+            rows.try_reserve(1).map_err(|error| error.to_string())?;
+            rows.push(rank);
+        }
+        Ok(Self { names, types })
+    }
+
+    pub fn visible_rows(
+        &self,
+        assets: &[AssetRecord],
+        filters: &Filters,
+        sort: SortColumn,
+        descending: bool,
+    ) -> Result<Vec<usize>, String> {
+        let filter = text_filter(filters)?;
+        let has_text = !filters.name.is_empty() || !filters.container.is_empty();
+        let mut rows = if filters.classes.is_empty() {
+            if !has_text {
+                self.names.clone()
+            } else {
+                self.names
+                    .iter()
+                    .copied()
+                    .filter(|&index| filter.matches(&assets[index]))
+                    .collect::<Vec<_>>()
+            }
+        } else {
+            let mut ranks = Vec::new();
+            for class in &filters.classes {
+                if let Some(bucket) = self.types.get(class) {
+                    ranks
+                        .try_reserve(bucket.len())
+                        .map_err(|error| error.to_string())?;
+                    ranks.extend_from_slice(bucket);
+                }
+            }
+            // Integer ranks merge type buckets without expensive string comparisons.
+            if filters.classes.len() > 1 {
+                ranks.sort_unstable();
+            }
+            ranks
+                .into_iter()
+                .map(|rank| self.names[rank])
+                .filter(|&index| !has_text || filter.matches(&assets[index]))
+                .collect()
+        };
+        if sort != SortColumn::Name {
+            rows.sort_unstable_by(|&a, &b| compare_rows(assets, a, b, sort));
+        }
+        if descending {
+            rows.reverse();
+        }
+        Ok(rows)
+    }
 }
 
 impl Catalog {
-    /// Materialized by the load worker, including all copying and indexes.
+    /// Materialized by the load worker; metadata is shared with the Session.
     #[cfg(test)]
     pub fn prepare(records: &[AssetRecord]) -> Result<Self, String> {
-        Self::prepare_with_progress(records, |_, _| {})
+        Self::prepare_with_progress(Arc::new(records.to_vec()), |_, _, _| {})
     }
 
     pub fn prepare_with_progress(
-        records: &[AssetRecord],
-        mut progress: impl FnMut(usize, usize),
+        assets: Arc<Vec<AssetRecord>>,
+        mut progress: impl FnMut(&'static str, usize, Option<usize>),
     ) -> Result<Self, String> {
-        let mut assets = Vec::new();
-        assets
-            .try_reserve_exact(records.len())
-            .map_err(|error| error.to_string())?;
         let mut by_key = HashMap::new();
         by_key
-            .try_reserve(records.len())
+            .try_reserve(assets.len())
             .map_err(|error| error.to_string())?;
-        let mut classes = BTreeMap::new();
-        let copy = |value: &str| -> Result<String, String> {
-            let mut output = String::new();
-            output
-                .try_reserve_exact(value.len())
-                .map_err(|error| error.to_string())?;
-            output.push_str(value);
-            Ok(output)
-        };
-        progress(0, records.len());
-        for (index, record) in records.iter().enumerate() {
+        let mut classes = BTreeMap::<String, usize>::new();
+        progress("Preparing browser", 0, Some(assets.len()));
+        for (index, record) in assets.iter().enumerate() {
             if index % 4096 == 0 {
-                progress(index, records.len());
+                progress("Preparing browser", index, Some(assets.len()));
             }
-            if by_key.insert(record.key, assets.len()).is_some() {
+            if by_key.insert(record.key, index).is_some() {
                 return Err("The asset catalog contains duplicate object identities.".to_owned());
             }
-            *classes.entry(copy(&record.class_name)?).or_default() += 1;
-            assets.push(AssetRecord {
-                key: record.key,
-                class_id: record.class_id,
-                class_name: copy(&record.class_name)?,
-                name: copy(&record.name)?,
-                container: copy(&record.container)?,
-                source: copy(&record.source)?,
-                size: record.size,
-            });
+            if let Some(count) = classes.get_mut(&record.class_name) {
+                *count += 1;
+            } else {
+                classes.insert(record.class_name.clone(), 1);
+            }
         }
-        progress(records.len(), records.len());
+        progress("Preparing browser", assets.len(), Some(assets.len()));
+        progress("Sorting assets", 0, None);
+        let rows = Arc::new(RowIndex::prepare(&assets)?);
         Ok(Self {
-            assets: Arc::new(assets),
+            assets,
             classes,
             by_key,
+            rows,
         })
     }
 }
 
+#[cfg(test)]
 pub fn visible_rows(
     assets: &[AssetRecord],
     filters: &Filters,
     sort: SortColumn,
     descending: bool,
 ) -> Result<Vec<usize>, String> {
-    let patterns = |value: &str| {
-        if value.is_empty() {
-            Vec::new()
-        } else if filters.regex {
-            vec![value.to_owned()]
-        } else {
-            vec![regex::escape(value)]
-        }
-    };
-    let classes = filters.class.iter().cloned().collect::<Vec<_>>();
+    let classes: Vec<_> = filters.classes.iter().cloned().collect();
     let filter = AssetFilter::new(
         &classes,
-        &patterns(&filters.name),
-        &patterns(&filters.container),
+        &patterns(&filters.name, filters.regex),
+        &patterns(&filters.container, filters.regex),
     )
     .map_err(|error| error.to_string())?;
     let mut rows: Vec<_> = assets
@@ -111,21 +213,49 @@ pub fn visible_rows(
         .enumerate()
         .filter_map(|(index, asset)| filter.matches(asset).then_some(index))
         .collect();
-    rows.sort_by(|&left, &right| {
-        let a = &assets[left];
-        let b = &assets[right];
-        let order = match sort {
-            SortColumn::Name => a.name.cmp(&b.name),
-            SortColumn::Class => a.class_name.cmp(&b.class_name),
-            SortColumn::Size => a.size.cmp(&b.size),
-            SortColumn::Container => a.container.cmp(&b.container),
-            SortColumn::Source => a.source.cmp(&b.source),
-            SortColumn::PathId => a.key.path_id.cmp(&b.key.path_id),
-        };
-        let order = order.then_with(|| a.key.cmp(&b.key));
-        if descending { order.reverse() } else { order }
-    });
+    rows.sort_unstable_by(|&a, &b| compare_rows(assets, a, b, sort));
+    if descending {
+        rows.reverse();
+    }
     Ok(rows)
+}
+
+fn patterns(value: &str, regex: bool) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else if regex {
+        vec![value.to_owned()]
+    } else {
+        vec![regex::escape(value)]
+    }
+}
+
+fn text_filter(filters: &Filters) -> Result<AssetFilter, String> {
+    AssetFilter::new(
+        &[],
+        &patterns(&filters.name, filters.regex),
+        &patterns(&filters.container, filters.regex),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn compare_rows(
+    assets: &[AssetRecord],
+    left: usize,
+    right: usize,
+    sort: SortColumn,
+) -> std::cmp::Ordering {
+    let a = &assets[left];
+    let b = &assets[right];
+    let order = match sort {
+        SortColumn::Name => a.name.cmp(&b.name),
+        SortColumn::Class => a.class_name.cmp(&b.class_name),
+        SortColumn::Size => a.size.cmp(&b.size),
+        SortColumn::Container => a.container.cmp(&b.container),
+        SortColumn::Source => a.source.cmp(&b.source),
+        SortColumn::PathId => a.key.path_id.cmp(&b.key.path_id),
+    };
+    order.then_with(|| a.key.cmp(&b.key))
 }
 
 pub fn select_row(
@@ -531,6 +661,168 @@ mod tests {
         source[0].name = "changed after preparation".to_owned();
         assert_eq!(catalog.assets[0].name, "second");
         assert!(Catalog::prepare(&[source[0].clone(), source[0].clone()]).is_err());
+    }
+
+    #[test]
+    fn indexed_multiple_types_match_reference_for_every_order_and_query() {
+        let records = Arc::new(
+            (0..180)
+                .map(|i| {
+                    let class = ["Mesh", "Texture2D", "TextAsset"][i % 3];
+                    let mut asset =
+                        record(i as i64 + 1, &format!("asset[{}]", (i * 31) % 23), class);
+                    asset.class_id = assetstudio_core::class_id(class).unwrap();
+                    asset.size = (i * 17 % 19) as u64;
+                    asset.container = format!("folder/{}/file", i % 2);
+                    asset
+                })
+                .collect::<Vec<_>>(),
+        );
+        let catalog = Catalog::prepare_with_progress(records.clone(), |_, _, _| {}).unwrap();
+        assert!(
+            Arc::ptr_eq(&records, &catalog.assets),
+            "preparing the browser must not duplicate all metadata"
+        );
+        for classes in [
+            BTreeSet::new(),
+            BTreeSet::from(["Mesh".into()]),
+            BTreeSet::from(["Mesh".into(), "Texture2D".into()]),
+            BTreeSet::from(["Missing".into()]),
+        ] {
+            for (name, regex) in [("", false), ("[1]", false), ("asset.*[12]", true)] {
+                for container in ["", "folder/1"] {
+                    let filters = Filters {
+                        classes: classes.clone(),
+                        name: name.into(),
+                        container: container.into(),
+                        regex,
+                    };
+                    for sort in [
+                        SortColumn::Name,
+                        SortColumn::Class,
+                        SortColumn::Size,
+                        SortColumn::Container,
+                        SortColumn::Source,
+                        SortColumn::PathId,
+                    ] {
+                        for descending in [false, true] {
+                            assert_eq!(
+                                catalog
+                                    .rows
+                                    .visible_rows(&records, &filters, sort, descending)
+                                    .unwrap(),
+                                visible_rows(&records, &filters, sort, descending).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            catalog
+                .rows
+                .visible_rows(
+                    &records,
+                    &Filters {
+                        name: "[".into(),
+                        regex: true,
+                        ..Default::default()
+                    },
+                    SortColumn::Name,
+                    false
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn type_search_and_sort_cycle_keep_ties_alphabetical() {
+        let types = BTreeMap::from([
+            ("Texture2D".into(), 7),
+            ("Mesh".into(), 50),
+            ("AudioClip".into(), 7),
+        ]);
+        let mut sort = TypeSort::default();
+        assert_eq!(sort.label(), "A");
+        assert_eq!(
+            sort.rows(&types, ""),
+            vec![("AudioClip", 7), ("Mesh", 50), ("Texture2D", 7)]
+        );
+        sort = sort.next();
+        assert_eq!(sort.label(), "↓");
+        assert_eq!(
+            sort.rows(&types, ""),
+            vec![("Mesh", 50), ("AudioClip", 7), ("Texture2D", 7)]
+        );
+        sort = sort.next();
+        assert_eq!(sort.label(), "↑");
+        assert_eq!(
+            sort.rows(&types, ""),
+            vec![("AudioClip", 7), ("Texture2D", 7), ("Mesh", 50)]
+        );
+        assert_eq!(sort.rows(&types, "  mEsH  "), vec![("Mesh", 50)]);
+        assert!(sort.rows(&types, "unknown").is_empty());
+        assert_eq!(sort.next().label(), "A");
+    }
+
+    #[test]
+    #[ignore = "requires ASSETSTUDIO_PERF_INPUT pointing to local Unity assets"]
+    fn real_asset_list_performance() {
+        use std::{path::PathBuf, time::Instant};
+        let path = PathBuf::from(
+            std::env::var_os("ASSETSTUDIO_PERF_INPUT").expect("set ASSETSTUDIO_PERF_INPUT"),
+        );
+        let now = Instant::now();
+        let session = assetstudio_core::Session::open(
+            &path,
+            &assetstudio_core::LoadOptions {
+                maximum_assets: 10_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        println!(
+            "Load {} assets: {:?}",
+            session.assets().len(),
+            now.elapsed()
+        );
+        let now = Instant::now();
+        let catalog =
+            Catalog::prepare_with_progress(session.shared_assets(), |_, _, _| {}).unwrap();
+        println!("Prepare browser indexes: {:?}", now.elapsed());
+        for classes in [
+            BTreeSet::new(),
+            BTreeSet::from(["Mesh".into()]),
+            BTreeSet::from(["Mesh".into(), "Texture2D".into()]),
+        ] {
+            let filters = Filters {
+                classes,
+                ..Default::default()
+            };
+            let now = Instant::now();
+            let old = visible_rows(session.assets(), &filters, SortColumn::Name, false).unwrap();
+            let old_time = now.elapsed();
+            let now = Instant::now();
+            let new = catalog
+                .rows
+                .visible_rows(session.assets(), &filters, SortColumn::Name, false)
+                .unwrap();
+            println!(
+                "Types {:?}: {} rows, reference {:?}, indexed {:?}",
+                filters.classes,
+                new.len(),
+                old_time,
+                now.elapsed()
+            );
+            assert_eq!(old, new);
+        }
+        let now = Instant::now();
+        let nodes = session.scene_outline_with_progress(None).unwrap();
+        println!(
+            "Browser hierarchy {} nodes: {:?}",
+            nodes.len(),
+            now.elapsed()
+        );
     }
 
     #[test]

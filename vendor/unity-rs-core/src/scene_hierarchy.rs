@@ -163,8 +163,49 @@ pub fn build_scene_hierarchy(
     collection: &AssetCollection,
     limits: SceneHierarchyLimits,
 ) -> Result<SceneHierarchy> {
+    build_hierarchy(collection, limits, false, None)
+}
+
+/// Browser-only topology. Renderer, material, skin and Animator payloads are not
+/// read. Model/export callers must keep using `build_scene_hierarchy`.
+pub fn build_scene_outline(
+    collection: &AssetCollection,
+    limits: SceneHierarchyLimits,
+    progress: Option<&crate::loader::LoadProgressObserver>,
+) -> Result<SceneHierarchy> {
+    build_hierarchy(collection, limits, true, progress)
+}
+
+fn build_hierarchy(
+    collection: &AssetCollection,
+    limits: SceneHierarchyLimits,
+    outline: bool,
+    progress: Option<&crate::loader::LoadProgressObserver>,
+) -> Result<SceneHierarchy> {
     let mut nodes = Vec::new();
     let mut state = SceneBuildState::default();
+    let total = collection
+        .serialized_files
+        .iter()
+        .map(|loaded| {
+            loaded
+                .file
+                .objects
+                .iter()
+                .filter(|object| object.class_id == GAME_OBJECT_CLASS_ID)
+                .count()
+        })
+        .sum();
+    let report = |completed, stage, total| {
+        if let Some(progress) = progress {
+            progress(crate::loader::LoadProgress {
+                stage,
+                completed,
+                total,
+            });
+        }
+    };
+    report(0, "Reading hierarchy", Some(total));
 
     for (file_index, loaded) in collection.serialized_files.iter().enumerate() {
         for (object_index, object) in loaded.file.objects.iter().enumerate() {
@@ -177,13 +218,25 @@ pub fn build_scene_hierarchy(
                     limits.maximum_game_objects
                 )));
             }
-            let node = read_scene_node(collection, file_index, object_index, limits, &mut state)?;
+            let node = read_scene_node(
+                collection,
+                file_index,
+                object_index,
+                limits,
+                &mut state,
+                outline,
+            )?;
             nodes.try_reserve(1).map_err(|error| {
                 Error::invalid_data(format!("cannot grow scene GameObjects: {error}"))
             })?;
             nodes.push(node);
+            if nodes.len() % 4096 == 0 {
+                report(nodes.len(), "Reading hierarchy", Some(total));
+            }
         }
     }
+    report(nodes.len(), "Reading hierarchy", Some(total));
+    report(0, "Connecting hierarchy", None);
     let remaining_index_bytes = limits
         .maximum_index_bytes
         .checked_sub(state.index_bytes)
@@ -241,6 +294,7 @@ pub fn build_scene_hierarchy_for_roots(
                 target.object_index,
                 limits,
                 &mut state,
+                false,
             )?;
             let index = nodes.len();
             by_object
@@ -337,6 +391,7 @@ fn read_scene_node(
     object_index: usize,
     limits: SceneHierarchyLimits,
     state: &mut SceneBuildState,
+    outline: bool,
 ) -> Result<SceneHierarchyNode> {
     let loaded = &collection.serialized_files[file_index];
     let game_object = read_game_object(&loaded.file, object_index, limits.scene)?;
@@ -368,6 +423,7 @@ fn read_scene_node(
             limits,
             state,
             &mut node,
+            outline,
         )?;
     }
     Ok(node)
@@ -380,14 +436,23 @@ fn bind_component(
     limits: SceneHierarchyLimits,
     state: &mut SceneBuildState,
     node: &mut SceneHierarchyNode,
+    outline: bool,
 ) -> Result<()> {
     let Some(target) = try_resolve_target(collection, source_file_index, reference) else {
         return Ok(());
     };
     let key = object_key(&target);
+    if outline
+        && !matches!(
+            target.object.class_id,
+            TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID
+        )
+    {
+        return Ok(());
+    }
     match target.object.class_id {
         TRANSFORM_CLASS_ID | RECT_TRANSFORM_CLASS_ID => {
-            bind_transform(collection, &target, key, limits, state, node)?;
+            bind_transform(collection, &target, key, limits, state, node, outline)?;
         }
         MESH_FILTER_CLASS_ID => {
             let filter = read_mesh_filter(target.file, target.object_index, limits.scene)?;
@@ -427,6 +492,7 @@ fn bind_transform(
     limits: SceneHierarchyLimits,
     state: &mut SceneBuildState,
     node: &mut SceneHierarchyNode,
+    outline: bool,
 ) -> Result<()> {
     let transform = read_transform(target.file, target.object_index, limits.scene)?;
     if !state.transform_owners.contains_key(&key) {
@@ -447,14 +513,16 @@ fn bind_transform(
     let parent_transform =
         try_resolve_transform_key(collection, target.file_index, transform.father);
     node.parent = resolve_transform_owner(collection, parent_transform, limits, state)?;
-    let mut declared_children =
-        reserve_vec(transform.children.len(), "Transform declared children")?;
-    for child in transform.children {
-        declared_children.push(try_resolve_transform_key(
-            collection,
-            target.file_index,
-            child,
-        ));
+    let mut declared_children = Vec::new();
+    if !outline {
+        declared_children = reserve_vec(transform.children.len(), "Transform declared children")?;
+        for child in transform.children {
+            declared_children.push(try_resolve_transform_key(
+                collection,
+                target.file_index,
+                child,
+            ));
+        }
     }
     node.transform = Some(TransformBinding {
         component: key,
@@ -864,6 +932,83 @@ mod tests {
     };
 
     #[test]
+    fn browser_outline_preserves_topology_and_skips_model_payloads() {
+        let collection = model_fixture();
+        let full = build_scene_hierarchy(&collection, SceneHierarchyLimits::default()).unwrap();
+        let updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = updates.clone();
+        let observer: crate::loader::LoadProgressObserver =
+            std::sync::Arc::new(move |update| captured.lock().unwrap().push(update));
+        let outline = super::build_scene_outline(
+            &collection,
+            SceneHierarchyLimits::default(),
+            Some(&observer),
+        )
+        .unwrap();
+        assert_eq!(full.roots, outline.roots);
+        for (full, outline) in full.nodes.iter().zip(&outline.nodes) {
+            assert_eq!(
+                (&full.name, full.object, full.parent, &full.children),
+                (
+                    &outline.name,
+                    outline.object,
+                    outline.parent,
+                    &outline.children
+                )
+            );
+            assert!(
+                outline.mesh_filter.is_none()
+                    && outline.mesh_renderer.is_none()
+                    && outline.skinned_mesh_renderer.is_none()
+                    && outline.animator.is_none()
+            );
+        }
+        let updates = updates.lock().unwrap();
+        assert!(
+            updates
+                .iter()
+                .any(|update| update.stage == "Reading hierarchy"
+                    && update.completed == 3
+                    && update.total == Some(3))
+        );
+        assert!(
+            super::build_scene_outline(
+                &collection,
+                SceneHierarchyLimits {
+                    maximum_game_objects: 1,
+                    ..Default::default()
+                },
+                None
+            )
+            .is_err()
+        );
+
+        let corrupt = self::collection(vec![(
+            "corrupt.assets",
+            parse_asset(
+                &[
+                    (
+                        GAME_OBJECT_CLASS_ID,
+                        1,
+                        game_object("object", &[reference(0, 11), reference(0, 21)]),
+                    ),
+                    (
+                        TRANSFORM_CLASS_ID,
+                        11,
+                        transform(reference(0, 1), &[], NULL),
+                    ),
+                    (MESH_RENDERER_CLASS_ID, 21, vec![0; 4]),
+                ],
+                &[],
+            ),
+        )]);
+        assert!(build_scene_hierarchy(&corrupt, SceneHierarchyLimits::default()).is_err());
+        let outline =
+            super::build_scene_outline(&corrupt, SceneHierarchyLimits::default(), None).unwrap();
+        assert_eq!(outline.nodes[0].name, "object");
+    }
+
+    #[test]
     fn selected_hierarchies_keep_ancestors_and_bones_without_unrelated_subtrees() {
         let collection = model_fixture();
         let selected = build_scene_hierarchy_for_roots(
@@ -1067,6 +1212,9 @@ mod tests {
             ),
         )]);
         assert!(build_scene_hierarchy(&corrupt, SceneHierarchyLimits::default()).is_err());
+        assert!(
+            super::build_scene_outline(&corrupt, SceneHierarchyLimits::default(), None).is_err()
+        );
         assert!(
             build_scene_hierarchy_for_roots(
                 &corrupt,

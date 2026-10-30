@@ -13,7 +13,9 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, TextEd
 
 use crate::audio::AudioPlayer;
 use crate::preview_image::{self, Channels};
-use crate::view::{self, Catalog, Filters, MeshMode, MeshPreview, MeshShading, SortColumn};
+use crate::view::{
+    self, Catalog, Filters, MeshMode, MeshPreview, MeshShading, RowIndex, SortColumn, TypeSort,
+};
 
 const ACCENT: Color32 = Color32::WHITE;
 const MUTED: Color32 = Color32::from_gray(145);
@@ -254,6 +256,9 @@ pub struct StudioApp {
     assets: Arc<Vec<AssetRecord>>,
     by_key: HashMap<AssetKey, usize>,
     classes: BTreeMap<String, usize>,
+    row_index: Arc<RowIndex>,
+    type_search: String,
+    type_sort: TypeSort,
     visible: Vec<usize>,
     filters: Filters,
     filter_error: Option<String>,
@@ -315,6 +320,9 @@ impl StudioApp {
             assets: Arc::new(Vec::new()),
             by_key: HashMap::new(),
             classes: BTreeMap::new(),
+            row_index: Arc::new(RowIndex::default()),
+            type_search: String::new(),
+            type_sort: TypeSort::default(),
             visible: Vec::new(),
             filters: Filters::default(),
             filter_error: None,
@@ -684,9 +692,14 @@ impl StudioApp {
                 };
                 self.stop_audio();
                 self.generation = self.generation.wrapping_add(1);
+                self.visible.clear();
                 self.assets = catalog.assets;
                 self.classes = catalog.classes;
                 self.by_key = catalog.by_key;
+                self.row_index = catalog.rows;
+                self.filters
+                    .classes
+                    .retain(|class| self.classes.contains_key(class));
                 for diagnostic in session
                     .diagnostics()
                     .iter()
@@ -929,7 +942,6 @@ impl StudioApp {
     fn queue_filter(&mut self) {
         self.filter_revision = self.filter_revision.wrapping_add(1);
         self.pending_filter = true;
-        self.visible.clear();
         self.filter_error = None;
     }
 
@@ -940,6 +952,7 @@ impl StudioApp {
         if self.pending_filter {
             self.pending_filter = false;
             let assets = self.assets.clone();
+            let rows = self.row_index.clone();
             let filters = self.filters.clone();
             let sort = self.sort;
             let descending = self.descending;
@@ -953,7 +966,7 @@ impl StudioApp {
                     Ok(TaskPayload::Filtered {
                         generation,
                         revision,
-                        result: view::visible_rows(&assets, &filters, sort, descending),
+                        result: rows.visible_rows(&assets, &filters, sort, descending),
                     })
                 },
             );
@@ -979,14 +992,15 @@ impl StudioApp {
             self.pending_scene = false;
             if let Some(session) = self.session.clone() {
                 let generation = self.generation;
-                self.start_task(
+                self.start_task_with_progress(
                     TaskKind::Scene,
                     "Building hierarchy…",
                     context,
-                    move || {
+                    move |progress| {
                         session
-                            .scene()
+                            .scene_outline_with_progress(Some(&progress.observer()))
                             .map(|nodes| {
+                                progress.update("Sorting hierarchy", 0, None);
                                 let rows = hierarchy_order(&nodes);
                                 TaskPayload::Scene {
                                     generation,
@@ -1163,9 +1177,10 @@ impl StudioApp {
                     })?;
                 auxiliary_inputs.push(folder);
             }
-            let catalog = Catalog::prepare_with_progress(session.assets(), |done, total| {
-                progress.update("Preparing browser", done, Some(total));
-            })?;
+            let catalog =
+                Catalog::prepare_with_progress(session.shared_assets(), |stage, done, total| {
+                    progress.update(stage, done, total);
+                })?;
             Ok(TaskPayload::Loaded {
                 paths,
                 resolved_paths,
@@ -1688,31 +1703,58 @@ impl StudioApp {
         ui.add_space(15.0);
         ui.separator();
         ui.add_space(8.0);
-        ui.label(RichText::new("Types").small().strong().color(MUTED));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Types").small().strong().color(MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let tooltip = match self.type_sort {
+                    TypeSort::Alphabetical => "Alphabetical · click for most assets first",
+                    TypeSort::Most => "Most assets first · click for fewest first",
+                    TypeSort::Least => "Fewest assets first · click for alphabetical",
+                };
+                if ui
+                    .small_button(self.type_sort.label())
+                    .on_hover_text(tooltip)
+                    .clicked()
+                {
+                    self.type_sort = self.type_sort.next();
+                }
+            });
+        });
+        ui.add(
+            TextEdit::singleline(&mut self.type_search)
+                .hint_text("Search types…")
+                .desired_width(ui.available_width()),
+        );
         ui.add_space(6.0);
         if ui
             .selectable_label(
-                self.filters.class.is_none(),
+                self.filters.classes.is_empty(),
                 format!("All types ({})", self.assets.len()),
             )
             .clicked()
         {
-            self.filters.class = None;
+            self.filters.classes.clear();
             self.filter_dirty = true;
         }
         egui::ScrollArea::vertical()
             .id_salt("type-filter")
             .max_height(260.0)
             .show(ui, |ui| {
-                for (class, count) in &self.classes {
+                let types = self.type_sort.rows(&self.classes, &self.type_search);
+                if types.is_empty() {
+                    ui.label(RichText::new("No matching types").small().color(MUTED));
+                }
+                for (class, count) in types {
+                    let mut selected = self.filters.classes.contains(class);
                     if ui
-                        .selectable_label(
-                            self.filters.class.as_ref() == Some(class),
-                            format!("{class}  {count}"),
-                        )
-                        .clicked()
+                        .checkbox(&mut selected, format!("{class}  {count}"))
+                        .changed()
                     {
-                        self.filters.class = Some(class.clone());
+                        if selected {
+                            self.filters.classes.insert(class.to_owned());
+                        } else {
+                            self.filters.classes.remove(class);
+                        }
                         self.filter_dirty = true;
                     }
                 }
@@ -1923,6 +1965,15 @@ impl StudioApp {
                 .small()
                 .color(MUTED),
             );
+            if self.pending_filter
+                || self
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| task.kind == TaskKind::Filter)
+            {
+                ui.spinner();
+                ui.label(RichText::new("Updating…").small().color(MUTED));
+            }
             if ui.small_button("Select filtered").clicked() {
                 self.selected
                     .extend(self.visible.iter().map(|&index| self.assets[index].key));
@@ -2057,7 +2108,11 @@ impl StudioApp {
                 }
             });
         if let Some((key, toggle, range)) = clicked {
-            let keys = self.ordered_keys();
+            let keys = if range || (toggle && self.primary == Some(key)) {
+                self.ordered_keys()
+            } else {
+                Vec::new()
+            };
             let previous = self.primary;
             view::select_row(
                 &mut self.selected,
@@ -2096,7 +2151,7 @@ impl StudioApp {
                     .color(MUTED),
             );
             ui.label(
-                RichText::new("Select a GameObject, then use More exports.")
+                RichText::new("Select a GameObject, then use Export → Selected models.")
                     .small()
                     .color(MUTED),
             );
@@ -3709,6 +3764,7 @@ mod tests {
         let context = egui::Context::default();
         let mut app = StudioApp::new(&context, None);
         app.generation = 10;
+        app.visible = vec![3, 1];
         app.filters.name = "old".to_owned();
         app.queue_filter();
         let obsolete = app.filter_revision;
@@ -3717,6 +3773,11 @@ mod tests {
         let latest = app.filter_revision;
         assert!(app.pending_filter);
         assert_eq!(app.filters.name, "new");
+        assert_eq!(
+            app.visible,
+            vec![3, 1],
+            "keep existing rows visible while a filter job runs"
+        );
         finish_filter(
             &mut app,
             &context,
