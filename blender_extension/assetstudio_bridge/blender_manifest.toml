@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "assetstudio_bridge"
+version = "0.1.1"
+name = "AssetStudio Rust Bridge"
+tagline = "Import Rust models and materials directly from AssetStudio"
+maintainer = "AssetStudio contributors"
+type = "add-on"
+blender_version_min = "5.3.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export", "Material"]
+
+[permissions]
+files = "Receive local AssetStudio model packages and load their textures"

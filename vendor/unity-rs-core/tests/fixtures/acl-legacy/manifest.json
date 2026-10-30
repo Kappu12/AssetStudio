@@ -1,0 +1,66 @@
+{
+  "upstream_acl_commit": "bb2a8fa89ecd7d197b670809c5ac983b38051401",
+  "dll_sha256": "2982fbcf80062c2ad20ea7bcc5b15b601de68e4eb9f71e11689c3d7694cfe9c9",
+  "fixtures": [
+    {
+      "name": "animated_variable",
+      "sha256": "c02bafa47984764f9da226610262eb4710abe4d5eb72bbadd41929a297c17dd2",
+      "cpp_csv_sha256": "f2609031390f969ad804e8ca0b37de041857403749ca6e2951c9e075a9512dd5",
+      "dll_csv_sha256": "3239d43ee8c94d64e9156ad9cdc5533f199d11e907d7697ac3288e0ee7a4f0fb"
+    },
+    {
+      "name": "multisegment_variable",
+      "sha256": "d1fe88945834aab04315933aa0d310b8680a1e4c0e3c6a6273e528441d1bead3",
+      "cpp_csv_sha256": "4bb6ed228d315aed6b099871612fa7193802492a767a1499ef40229da1912d9b",
+      "dll_csv_sha256": "49fbdf73638e03f485031933b4b8507b89090d89c8fe8ca3e784378710021701"
+    },
+    {
+      "name": "constant_variable",
+      "sha256": "6f172f8e3d0f449292b2df2aadc77dd53d22fd7d4742d6a62456743b8aad310b",
+      "cpp_csv_sha256": "77222e37fe697c428a18db2b0a08f4d2a7bef9f44c51283b315ac1cd38636093",
+      "dll_csv_sha256": "a7853f29486b3e9e72eb9a99dab1c6d2b0c9f73f1af47ffe25e072d03d30e83a"
+    },
+    {
+      "name": "default_variable",
+      "sha256": "d2890321b3e3ab5854bd1f1e4507c5fda1cc3a9c4cce457a1f29ad3bfd69e466",
+      "cpp_csv_sha256": "17fee70a92328ad099941d6190ae922d254d21df134ada95fa9669cd1b3d32bf",
+      "dll_csv_sha256": "26e99f31b12c18ec6318c24e21a8f37a096936e34c054a2be04ce79bd3ec8869"
+    },
+    {
+      "name": "mixed_variable",
+      "sha256": "27eb89e866d547d34f3a6fb751726bd078e6a7373ec910f20787f7632a2feb13",
+      "cpp_csv_sha256": "ce4043b9f341a50b2494f47ddc26ab7eaa5967d245e64f331c7ecb6653a322e3",
+      "dll_csv_sha256": "55c3cb517169a1542cd5a1723815f6216a457d99974bdd5509db8d1509d0a90c"
+    },
+    {
+      "name": "multibone_variable",
+      "sha256": "be99b102ea14c2c66ea521c810614aa73db28ac75ff30465f506028ddd583116",
+      "cpp_csv_sha256": "7876b7b4339fb7898f54089490324915758dc90505eaf501c3d767b538020995",
+      "dll_csv_sha256": "d054252bf6fa92cf473d6852ded0549a549efaba3d1600ad7f65209b570c48c4"
+    },
+    {
+      "name": "bitset_boundary_variable",
+      "sha256": "167e19edb854be36cb1272b6addebc80b73842e24d9b525f6d71eb999327e496",
+      "cpp_csv_sha256": "26fba8c7b9dc51c783c2fb9d6a51b561f3178943e6027e278a6e0ca168504f34",
+      "dll_csv_sha256": "6fa5e593196b30a87907080b2ff63308eb5e448d91e8c9a4242459ae6ace93a0"
+    },
+    {
+      "name": "no_scale_variable",
+      "sha256": "f098a2a5eebca4b8c40f11bf635ba4572385a7eac5002725d0e15c668ed925a3",
+      "cpp_csv_sha256": "5994e35ff12cfd342e4a1d14cd98c526b79823bdd47a886d52a8994a471cccb3",
+      "dll_csv_sha256": "9e505ac49566a2ab63aad168225151aedf5a960499e786d7992831f37debfbcc"
+    },
+    {
+      "name": "segment_constant_variable",
+      "sha256": "e4ac5b4f5a8dfb020056083690137b454b860019b3c6c022b330cfc84f9ff0e9",
+      "cpp_csv_sha256": "03d64fd92fa6f5e2188dd927d737e77afe35b44a2a2300d627875c717049144e",
+      "dll_csv_sha256": "7d5309f886c28ba71e9efdc9d283081e47a4430cd9fbef49bc40a2e7ce2724ee"
+    },
+    {
+      "name": "raw_escape_variable",
+      "sha256": "116c668551ac1e2ae839396f5cd956e39e10cd22563271f4ed7e2e0e5a2edb3e",
+      "cpp_csv_sha256": "db04ae1dc334c13c8e6bc5c41ab18273d391675656b7e7500817d46201ae77a7",
+      "dll_csv_sha256": "1ba176ca3f69f06990525ab7d12093d0be4f09706897cfa6cbef3cc6e706cf16"
+    }
+  ]
+}

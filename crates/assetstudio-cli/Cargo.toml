@@ -1,0 +1,25 @@
+[package]
+name = "assetstudio-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "AssetStudioCLI"
+path = "src/main.rs"
+
+[dependencies]
+clrmeta = "=0.1.0"
+assetstudio-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+unity_rs_core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

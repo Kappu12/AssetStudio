@@ -1,0 +1,292 @@
+{
+  "root": "/workspace/scratch/ae125a8ef50a/AssetStudio",
+  "status": "Final delivery source freeze. Runtime source is unchanged after all 213 Rust tests and 32 Python tests passed. Final test-only Container assertion and delivery-only package/report inclusion changes were reread. Parent verified the final assertion and all 32 pipeline tests; this reviewer queued no Cargo or repository writes.",
+  "scope": "First-party Rust production/test code, manifests, workflow, release scripts. Binary/JSON fixtures validated by tests; dependency sources are outside the full-read claim.",
+  "files": [
+    {
+      "file": ".cargo/config.toml",
+      "lines": 4,
+      "sha256": "579fe55c6dc8399879e4c94ef44ac197a796048d5be0cdc06e8a84a87a0c0e99"
+    },
+    {
+      "file": ".github/workflows/build.yml",
+      "lines": 138,
+      "sha256": "8ac73bfeece7c5f36dd338cd18171e0f2962c71532deedfc726375ecf8fa65ed"
+    },
+    {
+      "file": "Cargo.toml",
+      "lines": 28,
+      "sha256": "1ff90a1ff498c24d0c5ce50cfaf7a6ff71a2a0bb61ff2be0fa17c3b6b07297d6"
+    },
+    {
+      "file": "crates/assetstudio-cli/Cargo.toml",
+      "lines": 25,
+      "sha256": "170e852636d5857793e2ec7a8e88216c01baffb1d8ab04adc7f7ee33e691aefe"
+    },
+    {
+      "file": "crates/assetstudio-cli/src/main.rs",
+      "lines": 1275,
+      "sha256": "32f6bfd8d06ef6aebbb2796a98322b6570bbf5fb3546670d4037481b83a30741"
+    },
+    {
+      "file": "crates/assetstudio-cli/src/managed_metadata.rs",
+      "lines": 1226,
+      "sha256": "cc424cef2eb0702fe2f67391f8b272f607e9cac028a4ac1a7c3f3f9670c1c650"
+    },
+    {
+      "file": "crates/assetstudio-cli/src/managed_serializer.rs",
+      "lines": 774,
+      "sha256": "db3e1ebab55a142a540d2d9240eee96c8aa82ee55de2bee5d44f2729277d8eb0"
+    },
+    {
+      "file": "crates/assetstudio-cli/src/managed_templates.rs",
+      "lines": 455,
+      "sha256": "8f08644e51d7177bf8c82468c64ec23192e2289998f218e2cc0653d858828707"
+    },
+    {
+      "file": "crates/assetstudio-cli/src/schema_generator.rs",
+      "lines": 583,
+      "sha256": "c0113a8db79548d4e2a7304d88a9ce76961cc11b9018072fa3ab32c02a0e6ff4"
+    },
+    {
+      "file": "crates/assetstudio-cli/tests/native_schema.rs",
+      "lines": 226,
+      "sha256": "3753314f1ea959a0d9b9e60c3c36106726cc90a7a0f31112595d2d0b20f4b5c5"
+    },
+    {
+      "file": "crates/assetstudio-cli/tests/process.rs",
+      "lines": 1092,
+      "sha256": "10d6555052f26e8299f3254f766cc94393853f1292e1f78ff04079c77598aa57"
+    },
+    {
+      "file": "crates/assetstudio-core/Cargo.toml",
+      "lines": 25,
+      "sha256": "d92baded244a47cbbd1eca841713324e4b06a38152a88620c92443bfd08246d7"
+    },
+    {
+      "file": "crates/assetstudio-core/src/animation.rs",
+      "lines": 543,
+      "sha256": "836e337ab76db571b57f6020ec1ea8370836855cd77910f97361e4eb753e2d32"
+    },
+    {
+      "file": "crates/assetstudio-core/src/asset_map/json.rs",
+      "lines": 228,
+      "sha256": "062159ac184bbb443093ad4d587977d8ca7fffe7bf2d0babc23f0aefe3b793d7"
+    },
+    {
+      "file": "crates/assetstudio-core/src/asset_map/messagepack.rs",
+      "lines": 374,
+      "sha256": "941d442f1ddc6f75ad7e3234a47fb3fd44e22465930d3255c2ba6143a2596862"
+    },
+    {
+      "file": "crates/assetstudio-core/src/asset_map/xml.rs",
+      "lines": 399,
+      "sha256": "c377d02b1a2429fde74825f415c4a6f73baa7db664b2e58f1d3b3dc0e68bb0a4"
+    },
+    {
+      "file": "crates/assetstudio-core/src/asset_map.rs",
+      "lines": 657,
+      "sha256": "c2fd4c61751e8d50546c64fd359736c064c3e28d3cf391aa25a28184507a9a69"
+    },
+    {
+      "file": "crates/assetstudio-core/src/cab_map.rs",
+      "lines": 810,
+      "sha256": "c27258ae0ec8dba15403d91c956f279e9dceb05789b4d0f10a8a59b148e0db81"
+    },
+    {
+      "file": "crates/assetstudio-core/src/catalog.rs",
+      "lines": 129,
+      "sha256": "562db8d294d995f71160efac4674f087d31548559ace05be018bb232ba0ed75f"
+    },
+    {
+      "file": "crates/assetstudio-core/src/classes.rs",
+      "lines": 775,
+      "sha256": "d0da1ffd4bb51f2bb8b72774a3044a35b7459ee0fb516e3ddbf30e0e3306c87d"
+    },
+    {
+      "file": "crates/assetstudio-core/src/export.rs",
+      "lines": 753,
+      "sha256": "b4e85b4522746f676107921058abc0e4901020cb7a47038e9e8691a60d11a432"
+    },
+    {
+      "file": "crates/assetstudio-core/src/filter.rs",
+      "lines": 117,
+      "sha256": "25edf41cb61a18040bf2eb7994df93e9385675d529b255b639860b2628035a51"
+    },
+    {
+      "file": "crates/assetstudio-core/src/font_preview.rs",
+      "lines": 545,
+      "sha256": "35729c00e05a2da31bf1765c72656ac6ac00cf21638e43f2db4300a6bbf537e4"
+    },
+    {
+      "file": "crates/assetstudio-core/src/game_bundle.rs",
+      "lines": 669,
+      "sha256": "0ca84c747a8fbab6430e31cb493d24eaa6559a50a14e42c539226713bf8dd128"
+    },
+    {
+      "file": "crates/assetstudio-core/src/game_constants.rs",
+      "lines": 72,
+      "sha256": "6f7ab5db6e47d89dde1abed87d40ec8ada5c3b93df69936f98fd04314a275508"
+    },
+    {
+      "file": "crates/assetstudio-core/src/game_crypto.rs",
+      "lines": 173,
+      "sha256": "a1508e3392fa1a457e1611a58d6378104d3ae2eabead6c7ff28381e0d0c1c2bf"
+    },
+    {
+      "file": "crates/assetstudio-core/src/game_objects.rs",
+      "lines": 290,
+      "sha256": "b6bb4cab0b74855af5532136de66e30260ea49eb72a4ac265196688e044747c8"
+    },
+    {
+      "file": "crates/assetstudio-core/src/games.rs",
+      "lines": 1277,
+      "sha256": "42578a6d586f257d774de6993e9e0c059850f57bf29426bc06cee7f51f544b06"
+    },
+    {
+      "file": "crates/assetstudio-core/src/lib.rs",
+      "lines": 30,
+      "sha256": "d4875242785a77f2f72862bbc5943596a5156223e9f08325fb800a861cfbbea6"
+    },
+    {
+      "file": "crates/assetstudio-core/src/model.rs",
+      "lines": 345,
+      "sha256": "6728a771ab9d677a8d003d3bab92ab99e64f08772a0a20b7a7fad43ced0586d6"
+    },
+    {
+      "file": "crates/assetstudio-core/src/model_motion.rs",
+      "lines": 477,
+      "sha256": "a7fcf960c9b8f1530cf0326130fe987e83bf370ba8b88314fd348e59377a41ea"
+    },
+    {
+      "file": "crates/assetstudio-core/src/model_preview.rs",
+      "lines": 669,
+      "sha256": "e23e1bffaf11d88bdf159a68f5ffcf8af47dd95ebffc81fa3bef5b9d4a01bf18"
+    },
+    {
+      "file": "crates/assetstudio-core/src/output.rs",
+      "lines": 243,
+      "sha256": "92a510cb22f3a27389bccc3bb8751ba561d842bdbe30f2912f554565874ba0bd"
+    },
+    {
+      "file": "crates/assetstudio-core/src/recovery.rs",
+      "lines": 288,
+      "sha256": "c3ef9bb6991a0cc0ce7f9f580a02b7caa0b2c767c3f1eeddd10e643c358f1512"
+    },
+    {
+      "file": "crates/assetstudio-core/src/schema.rs",
+      "lines": 705,
+      "sha256": "20031f72e5c6c1b5fe15afa3f15f07d88348786f7b1cc4e7ac1ac2a47b470993"
+    },
+    {
+      "file": "crates/assetstudio-core/src/session.rs",
+      "lines": 916,
+      "sha256": "c70b292476c80778f7c79ef67400b3467c5377f6cdf804984b4ff101d84a7d52"
+    },
+    {
+      "file": "crates/assetstudio-core/src/source_protection.rs",
+      "lines": 235,
+      "sha256": "aa1e25f33e3822d0a2418f71399417b5f054b423483def31e2cee8894dac164a"
+    },
+    {
+      "file": "crates/assetstudio-core/src/unity_cn_keys.rs",
+      "lines": 155,
+      "sha256": "b4385fc95143d2c2d6b48d0179c65ca7494be39f99fd9539f8c1823f7e3a195d"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/acceptance.rs",
+      "lines": 300,
+      "sha256": "d218f71cefe19758aa7df438184d1bc88b5d9904974421fd079c53f470e82552"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/application.rs",
+      "lines": 476,
+      "sha256": "d8eb6a09377c0a815aa3680498068b31396377b8725221ca2ceb601b0feb234c"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/asset_map.rs",
+      "lines": 308,
+      "sha256": "400e4ac351285316fac9497d48f53fb9e7fa39e063fbd473f5ac7e6845795de9"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/cab_map.rs",
+      "lines": 406,
+      "sha256": "3e41be4303c5329d94e1ff73a8988db09581ef5435206d6ee650b2dbf8fb6ac2"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/font_preview.rs",
+      "lines": 91,
+      "sha256": "13a20393c56be1c5c6b42d92257b6d8dbad7122675fa20917d3c4da66fd39b7b"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/models.rs",
+      "lines": 969,
+      "sha256": "530d41af5fe734455038515fa21f1212635311fb4c5f1c33d061c20f1c4d0135"
+    },
+    {
+      "file": "crates/assetstudio-core/tests/schema.rs",
+      "lines": 338,
+      "sha256": "fc41a58599f05d70c049015b1d320a7c0d4c5f64df3e35814cb08f03bd3083cb"
+    },
+    {
+      "file": "crates/assetstudio-gui/Cargo.toml",
+      "lines": 24,
+      "sha256": "287c929e3c57e7b412d7a5a03854c190bbdb9e80fdcca1b74242848e73e2ebe7"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/app.rs",
+      "lines": 3237,
+      "sha256": "65085c3506104c55a00d129a0fc49e67ce1f0bfbd81b48311f52b892038e16df"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/audio.rs",
+      "lines": 590,
+      "sha256": "b8d7601ad252d0284a76ff1e129fad0ed5c2e1ae1ce5ac9d730feb638c8ae471"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/main.rs",
+      "lines": 75,
+      "sha256": "ca3e2cf35500aec821879309db28d9966c4ee4cdd6146a7a6437165c05366d7f"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/preferences.rs",
+      "lines": 211,
+      "sha256": "bbdc5d77d7c59b9d95049b2215ec946c3b62a4b95ddb31a0fffd5f178a4d0eba"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/preview_geometry.rs",
+      "lines": 202,
+      "sha256": "4385cde438591c616fef2116623a773c842192361f46b78a80c40a83bfe6c75a"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/preview_image.rs",
+      "lines": 92,
+      "sha256": "305384038b0fe88be6361536154688c4b9b27f79d19258bcc692fcc7092048c1"
+    },
+    {
+      "file": "crates/assetstudio-gui/src/view.rs",
+      "lines": 462,
+      "sha256": "8dc7465b0ef54bb34266526bc73fd516cae2ee167f3e9cee3c390e6ea253d339"
+    },
+    {
+      "file": "scripts/check_workflow_policy.py",
+      "lines": 48,
+      "sha256": "bab0de6802bbdad82a5d668943a8f3e5734791b736440b55f6ee9e7306f5d741"
+    },
+    {
+      "file": "scripts/package_release.py",
+      "lines": 412,
+      "sha256": "ca86a0ef3ee487afdc73109b0f16551493ca31ef971ac907cff9c444164c111d"
+    },
+    {
+      "file": "scripts/publish_release.py",
+      "lines": 93,
+      "sha256": "73711d9de2206977023d1c96e2e0a1ecf8bd08dbd10f32d7c8ecd8ca3b450151"
+    },
+    {
+      "file": "scripts/tests/test_release_pipeline.py",
+      "lines": 397,
+      "sha256": "a45e5cecd0b98f59ec13152ae853805bbc6e320740fe9425a4e32f770389e6f5"
+    }
+  ]
+}

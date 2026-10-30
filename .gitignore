@@ -344,3 +344,8 @@ healthchecksdb
 # Local OpenCode/agent notes and publish output
 AGENTS.md
 Build/
+
+# Rust workspace build outputs and local acceptance corpus
+/target/
+/dist/
+/corpus/private/

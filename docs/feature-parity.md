@@ -1,0 +1,97 @@
+# Feature migration checklist
+
+Reference: `94318fa4eecb79190330da933bbc3d7de49055ed`. This branch is a
+development migration, not a feature-complete replacement for the original
+fork. An implemented path, a synthetic acceptance check, and a real-game
+acceptance check are separate kinds of evidence.
+
+| Area | Rust implementation and evidence | Remaining limits |
+| --- | --- | --- |
+| Loading | Shared file/folder sessions, multi-input loading, split files, dependencies, UnityFS/Web/Raw/WebData and backend compression readers. Acceptance tests construct serialized v17/v22 files in both byte orders and plain/LZ4 UnityFS with streamed resources. | No representative real-game corpus was supplied. Not every backend format/codec has an application acceptance fixture. |
+| Catalog and selection | Class/name/container/source/PathID/size, regex filters, stable sorting, multi-selection, exact PathID filters and original class aliases. CLI process tests check combined filters and empty selections. | Catalog capacity is configurable up to ten million objects (desktop default ten million, CLI default one million); related name/index/container/text budgets scale with that choice. Limits remain bounded. |
+| Text and data | TextAsset, raw object bytes, type-tree Dump/JSON, stripped MonoBehaviour schemas and MiHoYoBinData XOR. Integration tests check exact exported bytes, actual parsed trees and malformed-input failures. | Generic type-tree output requires a valid embedded or recovered schema. A raw fallback is not counted as decoded conversion. |
+| Images | Backend Texture2D/Sprite/atlas decoding and PNG/JPEG/BMP/TGA export; GUI image zoom, RGB channel toggles and alpha isolation. Unity 6000 inline and streamed texture fixtures check pixels and row orientation. | The backend's full texture-format/platform matrix has not been independently exercised here. |
+| Audio | Backend original-payload/WAV conversion; native streaming WAV playback with pause, stop, seek, volume and loop. Device-free tests check decoded samples, malformed headers, streaming seeks and actual sink state. | No physical audio output device was available. Proprietary codecs and every historical audio layout are not established as equivalent. |
+| Video and fonts | Original VideoClip/MovieTexture/font payload export uses the backend. TrueType `glyf` fonts have a bounded in-memory sample preview, including a preflight against repeated composite expansion. | No embedded video player or all-format media acceptance claim. CFF/CFF2, variable and bitmap-only font previews return explicit errors; original font export is available. |
+| Mesh and model preview | Mesh/OBJ decoding and static GameObject/Animator hierarchy preview, including static-batch submeshes and batch-root placement. GUI offers flat/calculated/source normals, actual source vertex colors, wireframe and combined views, rotate/pan/zoom and shortcuts. Fixtures check transforms, instancing, compacted channels and malformed geometry; GUI tests check per-vertex painting. | Source modes require complete source channels. Static preview does not evaluate animation or render material textures. |
+| Scene hierarchy | Virtualized expandable tree, subtree checkboxes and checked-root split FBX packages. Asset context menus locate Mesh/GameObject/Animator owners; Model root and Next owner support complete prefabs and reused meshes. Pointer tests cover row text, context menus, checkboxes, collapse and stale navigation. Real DragonLauncher viewmodel FBX imports in Blender with ten meshes, 25 file images, one armature and 20 actions. | Native OS/GPU interaction remains unverified; UI events are exercised headlessly. |
+| FBX and OBJ | ASCII/binary FBX 7.1–7.5 and OBJ+MTL+PNG, including verified static-batch subset/world/root-space reconstruction. CLI/GUI expose scale, node pruning, skins/materials/blend shapes, animations/textures, Euler unroll, UV0–7 selection/roles and FBX joint size/casting. Both FBX encodings retain normals, colors, tangents and polygon materials; imported binary/ASCII object names agree. ufbx checks cover static transforms/materials, eight UV/texture channels and distinct texture transforms sharing one image. | Standard renderer readers cover Unity 2017.3–6000.3 and Tuanjie 2022.3; older fork layouts need ports. Not every skin/blend-shape/controller/avatar path has an independent fixture. FBX 6.x is unavailable. Geometry sharing a textured material needs a common emitted UV set; incompatible layouts fail explicitly. |
+| AnimationClip | Explicit/packed legacy curves and standard modern streamed/dense/constant binding streams export as Unity YAML `.anim`. Regressions check actual values/times/tangents, recovered child paths, custom property names and null references; FBX legacy motion retains its independent-reader checks. | Non-null object/script/event references require exported Unity GUID metadata and fail rather than becoming null. Separate discrete streamed layouts, unresolved identities and custom/external ACL streams remain unsupported. No Unity Editor import acceptance is claimed. |
+| Standard ACL decoder | Safe Rust backend API decodes resident standard scalar tracks (formats 7/10) and ACL 2.1 QVV tracks (format 10). Twelve independent upstream ACL 2.1 compressor/decompressor fixtures plus a durable 96-case edge corpus with 123,300 sample comparisons cover constants, quantization, raw fallback, segmentation and wrap optimization. | This low-level API does not establish custom Unity-fork decoder maps or bind poses, or automatically enable game ACL `.anim`/FBX export. Database streaming, stripped keyframes, external default poses and development formats 8/9 remain unsupported. |
+| Class structures | GUI/core list embedded definitions by Unity version/type identity, preserve negative script identities and last-loaded precedence, show/copy full definitions and export portable text files. Real SerializedFile fixtures check layout, ordering, budgets and input preservation. | Stripped inputs without embedded trees do not invent class definitions. |
+| Asset maps | JSON/XML lists, original MessagePack `.map` caches, exact object selection and confined cache source resolution. Genuine MessagePack-CSharp plain/LZ4 single/array/multiblock fixtures test interoperability. | Legacy caches without serialized-file identity fail on ambiguous PathID/class matches. This preserves correctness rather than guessing an object. |
+| CAB maps and recovery | Original BinaryWriter `.bin` caches, transitive dependency graphs, split groups, source-base relocation and offline asset-index container recovery. Tests use independently encoded bytes and real constructed UnityFS files. | Proprietary decrypted-stream nonzero CAB offsets, game-specific container equivalence and automatic remote asset-index downloads are not ported. |
+| Managed schemas | Native PE/ECMA metadata inspection in a bounded short-lived Rust child; DLLs are never executed. Three Unity-version sets of 20 independent reference snapshots and child-process stripped-object fixtures check fields, generics, arrays, strings, references and alignment. | Dynamic SerializeReference runtime payload reconstruction, multi-module assemblies and unsupported signatures still require additional work. |
+| Game profiles | 29 accepted profiles out of 39, including Naraka/TOT/BH3PrePre/ExAstris/LoveAndDeepspace/ArknightsEndfield container and explicit field variants. Numeric encrypted split groups decode after lazy joining under shared budgets. Independent C# AES/mr0k/LZ4Lit/header oracles supplement the existing NetEase cases, and actual Session fixtures check object conversion. See [game compatibility](game-compatibility.md). | Ten specialized profiles are explicitly rejected. Accepted profiles retain unverified game-version/opaque-codec limits. No named proprietary game's current live build has been verified. |
+| Desktop behavior | Native dialogs, folder/file/drop/reload, virtualized catalog, worker-side filtering/preview/export, hierarchy/class definitions, Preview/Dump/JSON modes, source-channel preview, detailed model controls and bounded atomic preferences without persisting explicit UnityCN keys. Regression tests cover same-asset mode changes, stale worker results and audio cancellation. | Actual OS dialog, graphics-driver and sound-device interaction needs native acceptance testing. |
+| CLI | Legacy positional interface and useful aliases, list/inspect/scene/extract/map/model/export operations, map/cache loading, schemas, keys and explicit exit codes. Child-process tests exercise actual binary invocations. | Unsupported legacy behavior is a visible error. See [CLI details](../crates/assetstudio-cli/README.md). |
+| Output preservation | Staged atomic output, no-clobber defaults, portable names, symlink/path checks, shared budgets and protection for loaded sources, split/resource companions, DLLs, schema/index/cache/key inputs and hardlink aliases. Regression tests compare original bytes after overwrite attempts. | No claim of protection against a separate hostile process concurrently replacing filesystem entries. |
+| Delivery | Three-OS GitHub-hosted workflow definition covers application and vendored-reader tests. At runtime checkpoint `dfb4867`, 1,004 workspace tests passed, 14 optional external oracles were explicitly ignored, and strict Clippy plus 37 Python policy/packaging tests passed. ZIPs include legal notices, local patch provenance and actual reader-source hashes. Tag-only release upload verifies downloaded bytes; no Actions artifacts/caches. | Clean optimized Linux build and native smoke tests passed. A hosted run has not yet been observed for this branch. Local checks do not replace actual MSVC/macOS execution. No tag or release has been created. |
+
+## Review evidence
+
+Two independent source review sweeps and their regressions are recorded in
+[review-sweeps.md](review-sweeps.md). The review scope is the first-party Rust
+application, adapters and delivery scripts, with targeted backend source tracing;
+it is not a fresh audit of every transitive dependency.
+
+The 2026-10-30 addenda cover the resumed feature work and targeted independent
+backend checks. Historical test counts belong to their named checkpoints;
+combined validation of the current frozen source is recorded separately.
+
+Synthetic inputs cover deterministic behavior and malformed cases. They cannot
+establish that every feature of the original fork works on real game data, and
+passing tests are not a zero-bug guarantee. The limits above must remain visible
+until implementation and corresponding acceptance evidence exist.
+
+The subsequent Endfield runtime passed 1,015 workspace tests (14 optional external
+checks ignored) and strict workspace Clippy. Its optimized CLI/profile probe
+passed. A fresh optimized GUI rebuild remains required; see the
+[local handoff](LOCAL_CODEX_HANDOFF.md).
+
+## Windows continuation, 2026-10-30
+
+- Fixed deleted-source protection across Windows canonical path prefixes, native
+  LF fixture creation in Python packaging checks, and Unix-only test imports.
+- Registered the preserved ACL 1.1 decoder and integrated BH3Pre MHY parsing,
+  standalone `.anim` expansion and model samples. Ten original-DLL/C++ codec
+  fixtures and three complete serialized clip fixtures establish this scope.
+  Modern model root bindings now resolve to their animation owner.
+- Added BH3Pre seed-keyed headers, pack-key blocks, concatenation and renderer
+  fields, with malformed-input and original primitive-oracle checks.
+- Added configurable bounded catalog capacity after the supplied 53.6 GB
+  Facepunch Rust folder exceeded the original one-million-name limit.
+- A fresh optimized MSVC GUI/CLI build and both native smoke checks passed.
+  Current Windows checks passed 1,005 Rust tests (14 optional external tests
+  ignored) and all 35 available Python tests (two symlink tests unavailable).
+  Strict workspace Clippy, formatting and workflow-policy checks passed.
+
+These checks supersede the old unresolved optimized-GUI build note for Windows.
+They do not establish macOS/hosted-CI execution or the ten rejected profiles.
+
+## Facepunch Rust acceptance on Windows
+
+The supplied unpacked corpus (168 files, 53,558,105,139 bytes) loaded with
+6,591,789 assets and no load diagnostics. It includes 1,561,420 GameObjects,
+56,733 meshes, 55,830 textures, 9,232 sprites, 5,212 clips and 10,557 audio clips.
+This is a specific local corpus result, not a claim about every Rust release.
+
+Real exports validated four PNGs (CRC/data/size checks), three nonempty WAVs
+(sample counts/rates), and three OBJ meshes (finite vertices and faces). A
+textured camper model exported 17 files with zero failures. Blender 5.3 imported
+the binary FBX as 78 mesh objects, 34,188 vertices and 30,374 polygons; three
+materials and ten file images loaded with no missing images.
+
+Corpus-driven fixes cover terminal-only streamed clips, minimum-finite slope
+sentinels, discrete streamed binding offsets, and repeated property-type scans.
+Selected model previews/exports now read their subtree plus ancestors, bones
+and static-batch dependencies instead of parsing every unrelated GameObject.
+A regression with 20,000 unrelated objects and a corrupt unrelated renderer
+checks the actual preview/export path; hierarchy budget and cycle checks remain.
+
+Final Windows checks: 1,009 Rust tests passed, 14 optional external checks ignored;
+35 Python tests passed with two symlink checks unavailable. Strict Clippy,
+formatting, workflow policy, optimized MSVC build and native smoke checks passed.
+Interactive desktop inspection could not start because computer-control approval
+timed out. Standalone `.anim` references still require Unity GUID metadata, and
+clip paths require their bound hierarchy/Avatar. See facepunch-rust.md for usage.
