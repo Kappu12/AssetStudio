@@ -16,6 +16,8 @@ mod bundle;
 mod constants;
 #[path = "game_crypto.rs"]
 mod crypto;
+#[path = "game_fairguard.rs"]
+mod fairguard;
 #[path = "game_mhy.rs"]
 mod mhy;
 #[path = "game_mr0k.rs"]
@@ -109,6 +111,7 @@ const SUPPORTED: &[&str] = &[
     "BH3PrePre",
     "ExAstris",
     "LoveAndDeepspace",
+    "ArknightsEndfield",
     "OPFP",
     "NetEase",
     "PerpetualNovelty",
@@ -443,7 +446,9 @@ pub fn decode_container_at(
         "FakeHeader" | "ShiningNikki" => strip_fake_header(data)?,
         "OPFP" => bundle::normalize(&strip_fake_header(data)?, profile, path, maximum)?,
         "NetEase" | "PerpetualNovelty" => bundle::normalize(data, profile, path, maximum)?,
-        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" => mhy::normalize(data, profile, maximum)?,
+        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" | "ArknightsEndfield" => {
+            mhy::normalize(data, profile, maximum)?
+        }
         "LoveAndDeepspace" => mhy::normalize(&decode_love_and_deepspace(data)?, profile, maximum)?,
         "EnsembleStars" => decode_ensemble(data)?,
         "FantasyOfWind" => decode_fantasy(data)?,
@@ -492,6 +497,7 @@ fn force_standard_bundle_transform(profile: &str) -> bool {
             | "TOT"
             | "BH3PrePre"
             | "ExAstris"
+            | "ArknightsEndfield"
             | "LoveAndDeepspace"
     )
 }
@@ -503,7 +509,10 @@ fn transform_standard_container(profile: &str, data: &[u8]) -> bool {
     if data.starts_with(UNITY_FS) {
         return true;
     }
-    if matches!(profile, "Naraka" | "TOT" | "BH3PrePre" | "ExAstris") {
+    if matches!(
+        profile,
+        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" | "ArknightsEndfield"
+    ) {
         for signature in [b"UnityWeb\0".as_slice(), b"UnityRaw\0".as_slice()] {
             if data.starts_with(signature)
                 && data

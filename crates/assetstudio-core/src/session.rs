@@ -898,6 +898,7 @@ pub(crate) fn backend_options(options: &LoadOptions) -> Result<AssetLoadOptions>
             "tot" => unity_rs_core::game_variant::GameVariant::TearsOfThemis,
             "bh3prepre" => unity_rs_core::game_variant::GameVariant::HonkaiImpact3PrePre,
             "exastris" => unity_rs_core::game_variant::GameVariant::ExAstris,
+            "arknightsendfield" => unity_rs_core::game_variant::GameVariant::ArknightsEndfield,
             "loveanddeepspace" => unity_rs_core::game_variant::GameVariant::LoveAndDeepspace,
             _ => unity_rs_core::game_variant::GameVariant::Standard,
         },

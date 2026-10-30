@@ -145,7 +145,10 @@ pub fn read_material(
     } else {
         Vec::new()
     };
-    let saved_properties = reader.read_property_sheet(file.unity_version.major >= 2021)?;
+    let saved_properties = reader.read_property_sheet(
+        file.unity_version.major >= 2021,
+        file.game_variant == GameVariant::ArknightsEndfield,
+    )?;
     let trailing_bytes = reader.reader.remaining()?;
 
     Ok(Material {
@@ -309,12 +312,14 @@ impl MaterialReader {
     fn read_property_sheet(
         &mut self,
         has_integer_properties: bool,
+        has_texture_uv_set_index: bool,
     ) -> Result<MaterialPropertySheet> {
         let texture_count = self.read_count(
             "Material texture environment",
             4_usize
                 .checked_add(self.pptr_size())
                 .and_then(|value| value.checked_add(16))
+                .and_then(|value| value.checked_add(usize::from(has_texture_uv_set_index) * 4))
                 .ok_or_else(|| Error::invalid_data("Material texture record size overflowed"))?,
         )?;
         let mut texture_environments =
@@ -324,6 +329,11 @@ impl MaterialReader {
             let texture = self.read_pptr()?;
             let scale = [self.reader.read_f32()?, self.reader.read_f32()?];
             let offset = [self.reader.read_f32()?, self.reader.read_f32()?];
+            if has_texture_uv_set_index {
+                // The fork serializes this per TexEnv; its managed exporter
+                // discards the value and uses the configured UV semantics.
+                let _uv_set_index = self.reader.read_i32()?;
+            }
             texture_environments.push(NamedMaterialProperty {
                 name,
                 value: MaterialTextureEnvironment {
@@ -679,6 +689,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn endfield_texenv_uv_index_preserves_following_properties_in_both_byte_orders() {
+        use crate::game_variant::GameVariant;
+        for endian in [TestEndian::Little, TestEndian::Big] {
+            let object = modern_object_variant(endian, GameVariant::ArknightsEndfield);
+            let parse = |bytes: &[u8]| {
+                let mut file = parse_asset(22, endian, 13, "2022.3.62f1", bytes, MATERIAL_CLASS_ID);
+                file.game_variant = GameVariant::ArknightsEndfield;
+                file
+            };
+            let file = parse(&object);
+            let value = read_material(&file, 0, MaterialReadLimits::default()).unwrap();
+            let environment = &value.saved_properties.texture_environments[0];
+            assert_eq!(environment.name, "_MainTex");
+            assert_eq!(environment.value.texture.path_id, 9);
+            assert_eq!(environment.value.scale, [2.0, 3.0]);
+            assert_eq!(environment.value.offset, [0.25, 0.5]);
+            assert_eq!(value.saved_properties.integers.len(), 2);
+            assert_eq!(value.saved_properties.integers[1].value, 2);
+            assert_eq!(value.saved_properties.floats[0].value, 0.75);
+            assert_eq!(value.trailing_bytes, 4);
+            for end in 0..object.len() - 4 {
+                assert!(
+                    read_material(&parse(&object[..end]), 0, MaterialReadLimits::default())
+                        .is_err(),
+                    "truncation {end}"
+                );
+            }
+            assert!(
+                read_material(
+                    &file,
+                    0,
+                    MaterialReadLimits {
+                        maximum_array_elements: 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
+            let standard = parse_asset(22, endian, 13, "2022.3.62f1", &object, MATERIAL_CLASS_ID);
+            assert!(read_material(&standard, 0, MaterialReadLimits::default()).is_err());
+        }
+    }
+
     fn modern_object(endian: TestEndian) -> Vec<u8> {
         modern_object_variant(endian, crate::game_variant::GameVariant::Standard)
     }
@@ -711,6 +765,9 @@ mod tests {
         push_aligned_string(&mut object, endian, "_MainTex");
         push_pptr(&mut object, endian, 0, 9, 22);
         push_f32s(&mut object, endian, &[2.0, 3.0, 0.25, 0.5]);
+        if game_variant == crate::game_variant::GameVariant::ArknightsEndfield {
+            endian.push_i32(&mut object, 0x5a5a_5a5a);
+        }
         endian.push_i32(&mut object, 2);
         push_named_i32(&mut object, endian, "_Mode", 1);
         push_named_i32(&mut object, endian, "_Mode", 2);

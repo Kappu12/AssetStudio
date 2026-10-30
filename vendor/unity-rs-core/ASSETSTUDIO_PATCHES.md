@@ -49,11 +49,15 @@ Backend changes must have corresponding tests and be listed below.
   ACL scalar tracks (release format versions 7/10) and ACL 2.1 QVV tracks
   (version 10). Independent ACL 2.1 compressor/decompressor fixtures cover
   scalar and QVV sample values, segmentation, quantization, constants, raw
-  fallback and wrap optimization. This API does not supply Unity-fork decoder
+  fallback and wrap optimization, including a durable 96-case edge corpus with
+  123,300 sample comparisons. This API does not supply Unity-fork decoder
   maps, external streams, stripped keyframes or external default poses.
 - Rust 1.99 Clippy compatibility cleanups in inherited code, without a blanket
   warning suppression. Targeted malformed-input, resource-budget and feature
   regressions accompany the compatibility changes.
+- Upstream corpus manifest and optional .NET oracle project retained at usable
+  vendored test paths. Optional external oracle tests remain explicitly ignored
+  unless the required external tools/corpus are supplied.
 
 The application-side game wrappers and modern `.anim` expansion live in
 `crates/assetstudio-core`; they are not upstream backend changes. The optional
@@ -67,3 +71,12 @@ of this manifest and every file under `src/`, including binary decoder tables.
 That digest identifies the locally modified reader actually selected by Cargo;
 the upstream revision alone does not identify the patched build. This change
 record and the original legal/notice bundle are included in release ZIPs.
+
+## Arknights Endfield follow-up
+
+Explicit Endfield selection retains its material UV index, renderer flags, mesh
+collision fields/metric, controller fields, and post-WrapMode animation mode and
+quantized dense ordering. Both-endian fixtures check truncations and budgets.
+Collision-baked meshes fail triangle export explicitly, matching the baseline
+which skips triangle conversion for that layout. App wrappers have original C#
+FairGuard/LZ4Inv oracles and real Session material/animation export checks.

@@ -69,8 +69,11 @@ Final delivery-only review: package_release.py now includes docs/reviews/sweep2.
 Independent reviewers inspected the resumed feature paths and the relevant
 backend handoffs. This addendum does not extend the old ledger into a claimed
 line-by-line audit of all vendored code or transitive dependencies. The current
-combined workspace gates are pending; historical test totals above remain tied
-to their earlier source snapshot.
+runtime checkpoint is `dfb48672160c9d38a5cfbc6b405fbc268399bf7f`: the combined
+all-target workspace run passed 1,004 tests with 14 explicitly ignored optional
+external oracles; strict workspace Clippy and 37 Python delivery/policy tests
+passed. The clean optimized Linux build and native CLI/GUI smoke tests passed. Historical totals above
+remain tied to their earlier source snapshot.
 
 Confirmed findings addressed during resumed review include shared multi-input
 game-buffer allowances resetting per selection or being swallowed by continue
@@ -80,6 +83,9 @@ referencing disabled/absent UV0 or aliasing different material transforms;
 nonempty unsupported meshes silently disappearing from mixed scenes; and
 recursive FBX transform assembly exhausting the stack on a valid 10,000-node
 child-first graph. Each has a focused regression at the owning layer.
+Additional regressions cover skin stripping leaving a skinned renderer behind,
+disabled materials still being parsed, and invalid edited settings replacing
+the last loadable preference file.
 
 Targeted writer verification passed 51 FBX tests before the final combined
 gates. `scripts/validate_fbx_channels.py` independently imported sixteen actual
@@ -108,6 +114,10 @@ classification. Format fixtures for modern `.anim`, variant objects and native
 standard ACL are synthetic and retain their own provenance. The ACL oracle uses
 the real upstream compressor/decompressor only in development; shipped code and
 normal Cargo tests do not run C++ or .NET.
+The retained ACL tests include twelve independent upstream fixtures and the
+96-case edge corpus with 123,300 sample comparisons. Optional .NET oracle and
+corpus-manifest paths were repaired for the vendored tree; explicitly ignored
+external checks remain separate from the passing test count.
 
 Static batches, source-normal/color preview, detailed FBX settings, modern
 standard muscle-stream expansion and encrypted split joining are now implemented

@@ -1,0 +1,119 @@
+{
+  "baseline": "94318fa4eecb79190330da933bbc3d7de49055ed",
+  "compiler": "Roslyn 4.11.0 (.NET SDK 8.0.419)",
+  "runtime": ".NET 8.0.25 linux-x64",
+  "source_sha256": {
+    "AssetStudio/Crypto/FairGuardUtils.cs": "e3160ec56aa4bf32fb7c02c3fb58931b61debda7672d0e74d9ab37030613ad2a",
+    "AssetStudio/LZ4/LZ4.cs": "61179ef76436e9387db7a9c04359f870584689c897abab6f36ba9c08c42f897b",
+    "AssetStudio/LZ4/LZ4Inv.cs": "ddce2c4e3889b09ad3e10cb6293ef3cdf95c5f1b7d7a26ce058c7532c50c224e"
+  },
+  "output_sha256": {
+    "fairguard-0.bin": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "fairguard-1.bin": {
+      "bytes": 1,
+      "sha256": "e7cf46a078fed4fafd0b5e3aff144802b853f8ae459a4f0c14add3314b7cc3a6"
+    },
+    "fairguard-1279.bin": {
+      "bytes": 1279,
+      "sha256": "c92f59c82168cd5434df683019e39fb6fa5fce81c60e957a85a38b5a1a6aab5d"
+    },
+    "fairguard-1280.bin": {
+      "bytes": 1280,
+      "sha256": "25004232302fa8b342b17ee2a8374a2c3d1c76ee8df3589d7808773e80bca6ac"
+    },
+    "fairguard-1281.bin": {
+      "bytes": 1281,
+      "sha256": "b56c1ef4f19654b58d97273d3ad65829ea3756fa42cae0fe84d340c4a122a679"
+    },
+    "fairguard-159.bin": {
+      "bytes": 159,
+      "sha256": "7b0baf186f39f7695f0aadce94ee5662c3c5ca345b13e52f108184238eae7bdf"
+    },
+    "fairguard-160.bin": {
+      "bytes": 160,
+      "sha256": "a3e878dca95a14489dbd981b7292e5863af0238301e730cb71ee190643e65c94"
+    },
+    "fairguard-161.bin": {
+      "bytes": 161,
+      "sha256": "17b4d2ae9a36eb9bb661c36c161c82780f572f3bbf37243dddfe39fda16316d0"
+    },
+    "fairguard-255.bin": {
+      "bytes": 255,
+      "sha256": "9e0aab0d0c5455739f497933ed7cee0a4506e71dfc423a09a33b8a6be696fa34"
+    },
+    "fairguard-31.bin": {
+      "bytes": 31,
+      "sha256": "0cc420417cb6a768e632bf1be8d1f197c9c0e9dd1dd2021e3bd37c46cee0516f"
+    },
+    "fairguard-32.bin": {
+      "bytes": 32,
+      "sha256": "5b39e40e715b7f7c48a0389cfd632c41dc566986972388abcf3849647dc77181"
+    },
+    "fairguard-33.bin": {
+      "bytes": 33,
+      "sha256": "f7c745580b0a460716910b9f2b5f350da188d7bf327652c9f1de9eeff72ae402"
+    },
+    "fairguard-4096.bin": {
+      "bytes": 4096,
+      "sha256": "5bddc1cb0344bddf5ed4a0cb9f3c5abe461dcf35665643faf035033e99176876"
+    },
+    "fairguard-80.bin": {
+      "bytes": 80,
+      "sha256": "ecc7e18c885d3074dee40ae5f81261e94a3e394502ee2a0ed2434dfdcebecf9a"
+    },
+    "fairguard-literal-inv.bin": {
+      "bytes": 4079,
+      "sha256": "49439e877bbcc4b76d8159d18df25b47a03ba7e009ae313f2280be01c387f5e5"
+    },
+    "fairguard-literal-inv.compressed": {
+      "bytes": 4096,
+      "sha256": "f99b192edb70431012c0a5bf12618524e9022a16483b8043889a4edcc4275c29"
+    },
+    "fairguard-literal-inv.encrypted": {
+      "bytes": 4096,
+      "sha256": "7dbbf2fa600c32bec47c47969a448c01562b337160d2b42cc7aad1d15740d40a"
+    },
+    "fairguard-literal-lz4.bin": {
+      "bytes": 4079,
+      "sha256": "0e78d345e24075d260d0ac5265397483bea118011d5238c38a307132cecc05b0"
+    },
+    "fairguard-literal-lz4.compressed": {
+      "bytes": 4096,
+      "sha256": "306a1b79511a2d5ee61efa4b8bd355251d51c227accdf9bf4ff1eb916baa892b"
+    },
+    "fairguard-literal-lz4.encrypted": {
+      "bytes": 4096,
+      "sha256": "4a1333c831b08963b87a5b09501395542f40cf6ca570623726710e4bfc6738bb"
+    },
+    "fairguard-overlap-inv.bin": {
+      "bytes": 50,
+      "sha256": "11dc93b5b2a8a344bd29daae5d7818299e6a0600c6d1defcca6ab94df09cf018"
+    },
+    "fairguard-overlap-inv.compressed": {
+      "bytes": 34,
+      "sha256": "4fa0c25e89a3323982f7907d9bfb46ddc3a699ed1869c354eb4352ab813497fa"
+    },
+    "fairguard-overlap-inv.encrypted": {
+      "bytes": 34,
+      "sha256": "d31574f82fb8354ae921d0d5acb6e614c8e1d7028b68dbce521968dd4240ed98"
+    },
+    "lz4inv-reference.bin": {
+      "bytes": 50,
+      "sha256": "454a81d7a32b668cb8fb6fc8e0a2c6fccd085eb2131b5546d6f926aca0f8368a"
+    },
+    "lz4inv-reference.inv": {
+      "bytes": 34,
+      "sha256": "367d79289cf250a332405889b443c2f8160d8db578414f5813a69d9704019595"
+    }
+  },
+  "integration_fixture": {
+    "name": "endfield-clip.assets",
+    "bytes": 780,
+    "sha256": "c9e26ec6c324985a80d0195d754b784d7221cd8683430a440eda8ba82b941245",
+    "generator": "vendor/unity-rs-core/src/animation_clip.rs::tests::quantized_complete_clip_fixture via ASSETSTUDIO_ENDFIELD_CLIP_FIXTURE",
+    "kind": "Synthetic Rust-generated Session integration fixture; independent C# crypto outputs are listed separately above."
+  }
+}

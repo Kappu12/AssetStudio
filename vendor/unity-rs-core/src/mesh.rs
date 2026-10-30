@@ -802,7 +802,7 @@ fn read_mesh_body(
         reader.skip_counted_auxiliary_records(4, "Mesh variable bone-count weight")?;
     }
 
-    let mesh_compression = read_mesh_flags(file, &mut reader, is_tuanjie)?;
+    let mesh_flags = read_mesh_flags(file, &mut reader, is_tuanjie)?;
     let mut index_buffer = read_mesh_index_buffer(&mut reader, limits)?;
 
     let legacy_skin = if version < (2018, 2, 0) {
@@ -811,7 +811,11 @@ fn read_mesh_body(
         None
     };
     let mut vertex_data = reader.read_vertex_data(version)?;
-    let compressed = reader.read_compressed_mesh()?;
+    let compressed = if mesh_flags.collision_baked {
+        CompressedMesh::default()
+    } else {
+        reader.read_compressed_mesh()?
+    };
     let has_virtual_geometry = read_mesh_tail(
         collection,
         file,
@@ -823,6 +827,14 @@ fn read_mesh_body(
     )?;
     reader.finish()?;
 
+    if mesh_flags.collision_baked {
+        // The managed reader deliberately returns before GetTriangles for
+        // these collision-only payloads. Do not invent a renderable surface.
+        return Err(Error::unsupported(
+            "Arknights Endfield collision-baked Mesh has no verified renderable triangle surface",
+        ));
+    }
+
     if has_virtual_geometry {
         return Err(Error::unsupported(
             "Tuanjie Mesh uses virtual geometry, whose cluster pages are not decoded",
@@ -832,7 +844,7 @@ fn read_mesh_body(
     let decoded = decode_mesh_sources(
         vertex_data,
         &compressed,
-        mesh_compression,
+        mesh_flags.compression,
         &mut index_buffer.values,
         reader.reader.endian(),
         limits,
@@ -1048,13 +1060,26 @@ fn charge_sub_mesh_indices(
     Ok(total)
 }
 
+struct MeshObjectFlags {
+    compression: u8,
+    collision_baked: bool,
+}
+
 fn read_mesh_flags(
     file: &SerializedFile,
     reader: &mut MeshObjectReader,
     is_tuanjie: bool,
-) -> Result<u8> {
+) -> Result<MeshObjectFlags> {
     let compression = reader.reader.read_u8()?;
     reader.skip(3, "Mesh readability flags")?;
+    let collision_baked = if file.game_variant == GameVariant::ArknightsEndfield {
+        let _collision_only = reader.reader.read_bool()?;
+        let baked = reader.reader.read_bool()?;
+        let _collision_convex = reader.reader.read_bool()?;
+        baked
+    } else {
+        false
+    };
     if is_tuanjie {
         let revision = tuanjie_shared_cluster_revision(file);
         if revision == 3 {
@@ -1063,7 +1088,10 @@ fn read_mesh_flags(
         reader.skip_tuanjie_shared_cluster(revision)?;
     }
     reader.align(4)?;
-    Ok(compression)
+    Ok(MeshObjectFlags {
+        compression,
+        collision_baked,
+    })
 }
 
 struct MeshIndexBuffer {
@@ -1144,6 +1172,9 @@ fn read_mesh_tail(
     reader.align(4)?;
     if version >= (2018, 2, 0) {
         reader.skip(8, "Mesh metrics")?;
+        if file.game_variant == GameVariant::ArknightsEndfield {
+            reader.skip(4, "Mesh Arknights Endfield additional metric")?;
+        }
     }
     if version >= (2018, 3, 0) {
         let stream = read_mesh_stream_info(reader, version)?;
@@ -4275,6 +4306,145 @@ mod tests {
         let mut mesh = simple_mesh();
         mesh.sub_meshes[0].indices = vec![0, 1, 3];
         assert!(write_mesh_obj(&mesh, &mut Vec::new(), 1024).is_err());
+    }
+
+    #[test]
+    fn endfield_collision_flags_conditional_payload_and_third_metric_are_bounded() {
+        use crate::endian::Endian;
+        use crate::game_variant::GameVariant;
+        for endian in [Endian::Little, Endian::Big] {
+            for baked in [false, true] {
+                let object = endfield_mesh_fixture(endian, baked);
+                let parse = |bytes: &[u8]| {
+                    let mut file = parse_v22_mesh(bytes);
+                    file.header.endianness = u8::from(endian == Endian::Big);
+                    file.game_variant = GameVariant::ArknightsEndfield;
+                    file
+                };
+                let file = parse(&object);
+                let value = read_mesh_geometry(&file, 0, MeshReadLimits::default());
+                if baked {
+                    assert!(
+                        matches!(value, Err(Error::Unsupported(ref reason)) if reason.contains("collision-baked"))
+                    );
+                } else {
+                    let value = value.unwrap();
+                    assert_eq!(
+                        value.mesh.vertices,
+                        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+                    );
+                    assert_eq!(value.mesh.sub_meshes[0].indices, [0, 1, 2]);
+                    assert!(
+                        read_mesh_geometry(
+                            &file,
+                            0,
+                            MeshReadLimits {
+                                maximum_vertices: 2,
+                                ..Default::default()
+                            }
+                        )
+                        .is_err()
+                    );
+                    assert!(
+                        read_mesh_geometry(
+                            &file,
+                            0,
+                            MeshReadLimits {
+                                maximum_decoded_bytes: 35,
+                                ..Default::default()
+                            }
+                        )
+                        .is_err()
+                    );
+                }
+                assert!(
+                    read_mesh_geometry(
+                        &file,
+                        0,
+                        MeshReadLimits {
+                            maximum_object_bytes: object.len() as u64 - 1,
+                            ..Default::default()
+                        }
+                    )
+                    .is_err()
+                );
+                for end in 0..object.len() {
+                    let result =
+                        read_mesh_geometry(&parse(&object[..end]), 0, MeshReadLimits::default());
+                    assert!(result.is_err(), "truncation {end}");
+                    assert!(
+                        !matches!(result, Err(Error::Unsupported(ref reason)) if reason.contains("collision-baked")),
+                        "collision rejection before reading tail at {end}"
+                    );
+                }
+                if !baked {
+                    let mut standard = parse(&object);
+                    standard.game_variant = GameVariant::Standard;
+                    assert!(read_mesh_geometry(&standard, 0, MeshReadLimits::default()).is_err());
+                }
+            }
+        }
+    }
+
+    fn endfield_mesh_fixture(endian: crate::endian::Endian, baked: bool) -> Vec<u8> {
+        use crate::endian::Endian;
+        fn word(out: &mut Vec<u8>, value: u32, endian: Endian) {
+            out.extend_from_slice(&match endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            });
+        }
+        fn half(out: &mut Vec<u8>, value: u16, endian: Endian) {
+            out.extend_from_slice(&match endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            });
+        }
+        let mut out = Vec::new();
+        word(&mut out, 3, endian);
+        out.extend_from_slice(b"tri");
+        align(&mut out, 4);
+        word(&mut out, 1, endian);
+        for value in [0, 3, 0, 0, 0, 3] {
+            word(&mut out, value, endian);
+        }
+        out.extend_from_slice(&[0; 24]);
+        // Empty blend-shape arrays, bind poses, bone hashes/root, bone AABBs,
+        // and variable bone-count weights, exactly as the modern C# reader.
+        for _ in 0..9 {
+            word(&mut out, 0, endian);
+        }
+        out.extend_from_slice(&[0, 1, 0, 0, 0, u8::from(baked), 1]);
+        align(&mut out, 4);
+        word(&mut out, 0, endian);
+        word(&mut out, 6, endian);
+        for value in 0..3 {
+            half(&mut out, value, endian);
+        }
+        align(&mut out, 4);
+        word(&mut out, 3, endian);
+        word(&mut out, 1, endian);
+        out.extend_from_slice(&[0, 0, 0, 3]);
+        word(&mut out, 36, endian);
+        for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            word(&mut out, value.to_bits(), endian);
+        }
+        if !baked {
+            // Every field of the empty packed-mesh block is zero, so this
+            // shared fixture has identical bytes in both object byte orders.
+            push_compressed_mesh_fixture(&mut out, MeshFixtureOptions::default());
+        }
+        out.extend_from_slice(&[0; 24]);
+        for _ in 0..4 {
+            word(&mut out, 0, endian);
+        }
+        for value in [1.0_f32, 2.0, 3.0] {
+            word(&mut out, value.to_bits(), endian);
+        }
+        out.extend_from_slice(&[0; 8]);
+        word(&mut out, 0, endian);
+        word(&mut out, 0, endian);
+        out
     }
 
     fn simple_mesh() -> Mesh {

@@ -64,7 +64,11 @@ fn file(objects: &[(i32, i64, Vec<u8>)], platform: i32) -> Vec<u8> {
     output
 }
 fn bundle(payload: &[u8], name: &str, block_code: u16) -> (Vec<u8>, usize) {
-    let mut compressed = lz4_flex::block::compress(payload);
+    let mut compressed = if block_code == 0 {
+        payload.to_vec()
+    } else {
+        lz4_flex::block::compress(payload)
+    };
     if block_code == 4 {
         // Literal-only swapped-token block avoids sharing a token walker with the reader.
         compressed = vec![0x0f];
@@ -174,8 +178,15 @@ fn options(profile: &str) -> LoadOptions {
 }
 
 #[test]
-fn five_new_profiles_load_real_serialized_text_and_export_exact_payloads() {
-    for profile in ["Naraka", "TOT", "BH3PrePre", "ExAstris", "LoveAndDeepspace"] {
+fn six_new_profiles_load_real_serialized_text_and_export_exact_payloads() {
+    for profile in [
+        "Naraka",
+        "TOT",
+        "BH3PrePre",
+        "ExAstris",
+        "LoveAndDeepspace",
+        "ArknightsEndfield",
+    ] {
         let source = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let platform = if matches!(profile, "TOT" | "BH3PrePre") {
@@ -190,7 +201,11 @@ fn five_new_profiles_load_real_serialized_text_and_export_exact_payloads() {
         let (mut data, size) = bundle(
             &payload,
             "CAB-main",
-            if profile == "ExAstris" { 4 } else { 3 },
+            match profile {
+                "ExAstris" => 4,
+                "ArknightsEndfield" => 0,
+                _ => 3,
+            },
         );
         match profile {
             "Naraka" => data = naraka(data, size),
@@ -226,38 +241,46 @@ fn five_new_profiles_load_real_serialized_text_and_export_exact_payloads() {
 }
 
 #[test]
-fn tot_concatenated_and_split_inputs_keep_both_exact_objects_and_deduplicate_parts() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut data, _) = bundle(&file(&[(49, 7, text("First", "one"))], -2), "CAB-first", 5);
-    let (second, _) = bundle(
-        &file(&[(49, 9, text("Second", "two"))], -2),
-        "CAB-second",
-        5,
-    );
-    data.extend_from_slice(&second);
-    let a = root.path().join("archive.bundle.split0");
-    let b = root.path().join("archive.bundle.split1");
-    fs::write(&a, &data[..100]).unwrap();
-    fs::write(&b, &data[100..]).unwrap();
-    let session = Session::open_paths(&[b.clone(), a.clone()], &options("TOT")).unwrap();
-    assert!(session.diagnostics().is_empty());
-    assert_eq!(session.assets().len(), 2);
-    assert_eq!(
-        session
-            .assets()
-            .iter()
-            .map(|asset| asset.name.as_str())
-            .collect::<Vec<_>>(),
-        ["First", "Second"]
-    );
-    assert!(
-        matches!(session.preview(session.assets()[0].key).unwrap(),Preview::Text(text) if text=="one")
-    );
-    assert!(
-        matches!(session.preview(session.assets()[1].key).unwrap(),Preview::Text(text) if text=="two")
-    );
-    assert_eq!(fs::read(a).unwrap(), data[..100]);
-    assert_eq!(fs::read(b).unwrap(), data[100..]);
+fn concatenated_and_split_game_inputs_keep_both_exact_objects_and_deduplicate_parts() {
+    for profile in ["TOT", "ArknightsEndfield"] {
+        let platform = if profile == "TOT" { -2 } else { 13 };
+        let block_code = if profile == "TOT" { 5 } else { 0 };
+        let root = tempfile::tempdir().unwrap();
+        let (mut data, _) = bundle(
+            &file(&[(49, 7, text("First", "one"))], platform),
+            "CAB-first",
+            block_code,
+        );
+        let (second, _) = bundle(
+            &file(&[(49, 9, text("Second", "two"))], platform),
+            "CAB-second",
+            block_code,
+        );
+        data.extend_from_slice(&second);
+        let a = root.path().join("archive.bundle.split0");
+        let b = root.path().join("archive.bundle.split1");
+        fs::write(&a, &data[..100]).unwrap();
+        fs::write(&b, &data[100..]).unwrap();
+        let session = Session::open_paths(&[b.clone(), a.clone()], &options(profile)).unwrap();
+        assert!(session.diagnostics().is_empty());
+        assert_eq!(session.assets().len(), 2);
+        assert_eq!(
+            session
+                .assets()
+                .iter()
+                .map(|asset| asset.name.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+        assert!(
+            matches!(session.preview(session.assets()[0].key).unwrap(),Preview::Text(text) if text=="one")
+        );
+        assert!(
+            matches!(session.preview(session.assets()[1].key).unwrap(),Preview::Text(text) if text=="two")
+        );
+        assert_eq!(fs::read(a).unwrap(), data[..100]);
+        assert_eq!(fs::read(b).unwrap(), data[100..]);
+    }
 }
 
 fn material(profile: &str) -> Vec<u8> {
@@ -277,7 +300,19 @@ fn material(profile: &str) -> Vec<u8> {
         data.extend_from_slice(&12345_i32.to_le_bytes());
     }
     data.extend_from_slice(&0_i32.to_le_bytes()); // Disabled passes.
-    data.extend_from_slice(&[0; 12]); // Texture/int/float property counts.
+    if profile == "ArknightsEndfield" {
+        data.extend_from_slice(&1_i32.to_le_bytes()); // Texture property count.
+        string(&mut data, "_MainTex");
+        data.extend_from_slice(&0_i32.to_le_bytes());
+        data.extend_from_slice(&0_i64.to_le_bytes());
+        for value in [1.0_f32, 1.0, 0.0, 0.0] {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        data.extend_from_slice(&7_i32.to_le_bytes()); // Endfield UV set index.
+        data.extend_from_slice(&[0; 8]); // Int/float property counts.
+    } else {
+        data.extend_from_slice(&[0; 12]); // Texture/int/float property counts.
+    }
     data.extend_from_slice(&1_i32.to_le_bytes());
     string(&mut data, "_Color");
     for value in [0.25_f32, 0.5, 0.75, 1.0] {
@@ -287,16 +322,20 @@ fn material(profile: &str) -> Vec<u8> {
 }
 
 #[test]
-fn wrapped_naraka_and_lnd_materials_use_the_actual_variant_reader() {
-    for profile in ["Naraka", "LoveAndDeepspace"] {
+fn wrapped_game_materials_use_the_actual_variant_reader() {
+    for profile in ["Naraka", "LoveAndDeepspace", "ArknightsEndfield"] {
         let root = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let payload = file(&[(21, 11, material(profile))], 13);
-        let (data, size) = bundle(&payload, "CAB-material", 3);
-        let data = if profile == "Naraka" {
-            naraka(data, size)
-        } else {
-            lnd(&data)
+        let (data, size) = bundle(
+            &payload,
+            "CAB-material",
+            if profile == "ArknightsEndfield" { 0 } else { 3 },
+        );
+        let data = match profile {
+            "Naraka" => naraka(data, size),
+            "LoveAndDeepspace" => lnd(&data),
+            _ => data,
         };
         let input = root.path().join("materials.bundle");
         fs::write(&input, data).unwrap();
@@ -317,5 +356,37 @@ fn wrapped_naraka_and_lnd_materials_use_the_actual_variant_reader() {
             serde_json::from_slice(&fs::read(&report.written[0]).unwrap()).unwrap();
         assert!(json.to_string().contains("_Color"));
         assert!(json.to_string().contains("0.25"));
+        if profile == "ArknightsEndfield" {
+            assert!(json.to_string().contains("_MainTex"));
+        }
     }
+}
+
+#[test]
+fn endfield_quantized_animation_reaches_real_anim_export_from_a_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let serialized = include_bytes!("fixtures/endfield-oracle/endfield-clip.assets");
+    let (data, _) = bundle(serialized, "CAB-endfield-animation", 0);
+    let input = root.path().join("animation.bundle");
+    fs::write(&input, &data).unwrap();
+    let session = Session::open(&input, &options("ArknightsEndfield")).unwrap();
+    assert!(session.diagnostics().is_empty());
+    assert_eq!(session.assets().len(), 1);
+    assert_eq!(session.assets()[0].name, "Quantized Clip");
+    let report = session
+        .export(
+            &[session.assets()[0].key],
+            output.path(),
+            &ExportOptions::default(),
+        )
+        .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(report.written.len(), 1);
+    assert_eq!(report.written[0].extension().unwrap(), "anim");
+    let yaml = fs::read_to_string(&report.written[0]).unwrap();
+    assert!(yaml.contains("m_SampleRate: 30"));
+    assert!(yaml.contains("x: -10"));
+    assert!(yaml.contains("z: 10"));
+    assert_eq!(fs::read(input).unwrap(), data);
 }

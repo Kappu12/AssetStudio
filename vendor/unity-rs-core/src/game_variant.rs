@@ -21,6 +21,8 @@ pub enum GameVariant {
     /// Love and Deepspace's material, mesh, shader and controller additions.
     /// This selects layout fields only; opaque animation codecs stay separate.
     LoveAndDeepspace,
+    /// Arknights Endfield's material, renderer, mesh, controller and dense clip fields.
+    ArknightsEndfield,
 }
 
 impl GameVariant {
@@ -51,6 +53,7 @@ mod tests {
             GameVariant::Naraka,
             GameVariant::ExAstris,
             GameVariant::LoveAndDeepspace,
+            GameVariant::ArknightsEndfield,
         ] {
             assert_eq!(variant.effective_target_platform(-2), -2);
         }

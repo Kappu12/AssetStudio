@@ -219,6 +219,7 @@ struct RendererObjectReader {
     version: (u32, u32, u32),
     version_build: u32,
     is_tuanjie: bool,
+    game_variant: crate::game_variant::GameVariant,
     limits: RendererReadLimits,
     reference_bytes: u64,
 }
@@ -264,6 +265,7 @@ impl RendererObjectReader {
             version: file.unity_version.components(),
             version_build: file.unity_version.build,
             is_tuanjie: file.unity_version.build_type.as_deref() == Some("t"),
+            game_variant: file.game_variant,
             limits,
             reference_bytes: 0,
         })
@@ -277,6 +279,11 @@ impl RendererObjectReader {
         let _dynamic_occludee = self.reader.read_u8()?;
         if self.version >= (2021, 1, 0) {
             let _static_shadow_caster = self.reader.read_u8()?;
+            if self.game_variant == crate::game_variant::GameVariant::ArknightsEndfield {
+                let _realtime_shadow_caster = self.reader.read_u8()?;
+                let _sub_mesh_render_mode = self.reader.read_u8()?;
+                let _character_index = self.reader.read_u8()?;
+            }
         }
         let _motion_vectors = self.reader.read_u8()?;
         let _light_probe_usage = self.reader.read_u8()?;
@@ -808,6 +815,140 @@ mod tests {
             object.extend_from_slice(&2_i32.to_le_bytes());
         }
         object
+    }
+
+    #[test]
+    fn endfield_renderer_flags_preserve_mesh_and_skinned_references_in_both_orders() {
+        use crate::endian::Endian;
+        use crate::game_variant::GameVariant;
+        for endian in [Endian::Little, Endian::Big] {
+            for skinned in [false, true] {
+                let class = if skinned {
+                    SKINNED_MESH_RENDERER_CLASS_ID
+                } else {
+                    MESH_RENDERER_CLASS_ID
+                };
+                let object = endfield_renderer_fixture(endian, skinned);
+                let parse = |bytes: &[u8]| {
+                    let mut file = parse_asset(class, "2022.3.62f1", bytes);
+                    // The metadata builder is little endian; the isolated
+                    // renderer payload exercises both reader byte orders.
+                    file.header.endianness = u8::from(endian == Endian::Big);
+                    file.game_variant = GameVariant::ArknightsEndfield;
+                    file
+                };
+                let file = parse(&object);
+                let renderer = if skinned {
+                    let value = read_skinned_mesh_renderer(&file, 0, RendererReadLimits::default())
+                        .unwrap();
+                    assert_eq!(value.mesh.path_id, 50);
+                    assert_eq!(value.bones[0].path_id, 61);
+                    assert_eq!(value.bones[1].file_id, 1);
+                    assert_eq!(value.blend_shape_weights, [0.25, 0.75]);
+                    assert_eq!(value.trailing_bytes, 0);
+                    value.renderer
+                } else {
+                    let value =
+                        read_mesh_renderer(&file, 0, RendererReadLimits::default()).unwrap();
+                    assert_eq!(value.trailing_bytes, 0);
+                    value.renderer
+                };
+                assert_eq!(renderer.materials[0].path_id, 21);
+                assert_eq!(renderer.static_batch_info.first_sub_mesh, 3);
+                assert_eq!(renderer.static_batch_info.sub_mesh_count, 4);
+                assert_eq!(renderer.static_batch_root.path_id, 31);
+                assert_eq!(renderer.sorting_layer_id, 41);
+                assert_eq!(renderer.sorting_order, 43);
+                for end in 0..object.len() {
+                    let file = parse(&object[..end]);
+                    let result = if skinned {
+                        read_skinned_mesh_renderer(&file, 0, RendererReadLimits::default())
+                            .map(|_| ())
+                    } else {
+                        read_mesh_renderer(&file, 0, RendererReadLimits::default()).map(|_| ())
+                    };
+                    assert!(result.is_err(), "truncation {end}");
+                }
+                let limits = RendererReadLimits {
+                    maximum_materials: 0,
+                    ..Default::default()
+                };
+                let limited = if skinned {
+                    read_skinned_mesh_renderer(&file, 0, limits).map(|_| ())
+                } else {
+                    read_mesh_renderer(&file, 0, limits).map(|_| ())
+                };
+                assert!(limited.is_err());
+            }
+        }
+        // Before StaticShadowCaster existed, Endfield adds no renderer bytes.
+        let object = renderer_prefix("2017.4.39f1");
+        let mut file = parse_asset(MESH_RENDERER_CLASS_ID, "2017.4.39f1", &object);
+        file.game_variant = GameVariant::ArknightsEndfield;
+        assert_eq!(
+            read_mesh_renderer(&file, 0, RendererReadLimits::default())
+                .unwrap()
+                .renderer
+                .materials[0]
+                .path_id,
+            21
+        );
+    }
+
+    fn endfield_renderer_fixture(endian: crate::endian::Endian, skinned: bool) -> Vec<u8> {
+        use crate::endian::Endian;
+        fn word(out: &mut Vec<u8>, value: u32, endian: Endian) {
+            out.extend_from_slice(&match endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            });
+        }
+        fn half(out: &mut Vec<u8>, value: u16, endian: Endian) {
+            out.extend_from_slice(&match endian {
+                Endian::Little => value.to_le_bytes(),
+                Endian::Big => value.to_be_bytes(),
+            });
+        }
+        fn pointer(out: &mut Vec<u8>, file: u32, path: u64, endian: Endian) {
+            word(out, file, endian);
+            out.extend_from_slice(&match endian {
+                Endian::Little => path.to_le_bytes(),
+                Endian::Big => path.to_be_bytes(),
+            });
+        }
+        let mut out = Vec::new();
+        pointer(&mut out, 0, 11, endian);
+        out.extend_from_slice(&[1, 2, 1, 0, 0, 0x21, 0x43, 0x65, 0, 0, 0, 0, 0]);
+        align(&mut out, 4);
+        word(&mut out, u32::MAX, endian);
+        word(&mut out, 0, endian);
+        half(&mut out, 0, endian);
+        half(&mut out, 0, endian);
+        out.extend_from_slice(&[0; 32]);
+        word(&mut out, 1, endian);
+        pointer(&mut out, 0, 21, endian);
+        half(&mut out, 3, endian);
+        half(&mut out, 4, endian);
+        for path in [31, 32, 33] {
+            pointer(&mut out, 0, path, endian);
+        }
+        word(&mut out, 41, endian);
+        half(&mut out, 42, endian);
+        half(&mut out, 43, endian);
+        align(&mut out, 4);
+        if skinned {
+            word(&mut out, 5, endian);
+            out.extend_from_slice(&[1, 0]);
+            align(&mut out, 4);
+            pointer(&mut out, 0, 50, endian);
+            word(&mut out, 2, endian);
+            pointer(&mut out, 0, 61, endian);
+            pointer(&mut out, 1, 62, endian);
+            word(&mut out, 2, endian);
+            word(&mut out, 0.25_f32.to_bits(), endian);
+            word(&mut out, 0.75_f32.to_bits(), endian);
+        }
+        out
     }
 
     fn push_optional_byte(output: &mut Vec<u8>, enabled: bool, value: u8) {

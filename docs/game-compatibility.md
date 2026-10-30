@@ -25,9 +25,9 @@ All accepted wrapper profiles expose a visible advisory through
 These advisories do not count as load failures or change a successful CLI exit
 status. Input files are never modified.
 
-The current selector accepts **27 of the 39** baseline profiles. Twelve remain
+The current selector accepts **28 of the 39** baseline profiles. Eleven remain
 explicit errors: GI/GI_Pack/GI_CB1/GI_CB2/GI_CB3/GI_CB3Pre, BH3/BH3Pre,
-ZZZ_CB1, SR_CB2/SR and ArknightsEndfield. Acceptance of a profile covers the
+ZZZ_CB1 and SR_CB2/SR. Acceptance of a profile covers the
 implemented container and field variants below, not every historical layout or
 its opaque animation codec.
 
@@ -64,7 +64,7 @@ its opaque animation codec.
 | CodenameJump | Repeating XOR wrapper implemented | Exact synthetic output comparison |
 | GirlsFrontline | Header-derived XOR prefix implemented | Synthetic transform checks; live game not tested |
 | Reverse1999 | Filename-derived byte XOR implemented | Exact synthetic output comparison; original filename required |
-| ArknightsEndfield | Not implemented | LZ4Inv blocks, BLB containers, first-block encryption and animation layouts |
+| ArknightsEndfield | FairGuard first-block encryption, normal/inverted LZ4, concatenated/split UnityFS, and explicit material/renderer/mesh/controller/quantized-animation layouts implemented | Original C# byte oracles, both-endian parser fixtures and Session material/animation exports; collision-baked meshes have no triangle surface and fail explicitly. Live game not tested. |
 | JJKPhantomParade | Generation-1 AES-256 counter wrapper implemented | Synthetic header/counter checks; current game versions not tested |
 | MuvLuvDimensions | Repeating XOR wrapper implemented | Exact synthetic output comparison |
 | PartyAnimals | Filename-derived tail XOR implemented | Original filename required; synthetic transform checks |

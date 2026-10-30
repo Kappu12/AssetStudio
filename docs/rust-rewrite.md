@@ -46,14 +46,17 @@ branch, with explicit remaining compatibility gaps. Checkpoint `6fad9ef` passed
 213 application tests, strict Clippy, formatting, an optimized Linux build,
 native-program smoke checks, Windows GNU cross-target checking and 32 pipeline
 tests. These are historical results. The resumed frozen source has additional
-backend, game, model, animation, class-structure and GUI regressions; final
-combined gates are pending. The delivery suite now has 37 passing Python tests.
+backend, game, model, animation, class-structure and GUI regressions. At runtime
+checkpoint `dfb4867`, the combined all-target workspace run passed 1,004 tests
+with 14 explicitly ignored optional external oracles; strict workspace Clippy
+and 37 Python delivery/policy tests passed. The optimized Linux release build
+passed in a clean isolated worktree, along with native CLI/GUI smoke tests.
 Two independent source sweeps and current addenda are recorded in
 [review-sweeps.md](review-sweeps.md). No release has been created.
 
 ## Resumed compatibility work, 2026-10-30
 
-- 27 of 39 game profiles now have accepted paths, including five added container
+- 28 of 39 game profiles now have accepted paths, including six added container
   and explicit serialized-field variants. Encrypted numeric split groups and
   multi-input wrapper budgets are shared across a whole operation.
 - Static batching retains renderer submesh/root identities, compacts all vertex
@@ -68,8 +71,9 @@ Two independent source sweeps and current addenda are recorded in
   with bounded samples and resolved names. Non-null Unity reference GUIDs and
   unmapped custom/external ACL contracts remain explicit errors.
 - A separate safe Rust backend API decodes standard resident ACL scalar/QVV
-  samples; twelve genuine upstream ACL 2.1 compressed fixtures and independent
-  CSV samples establish that scope, without a C++ runtime dependency.
+  samples; twelve genuine upstream ACL 2.1 compressed fixtures plus a durable
+  96-case edge corpus with 123,300 sample comparisons establish that scope,
+  without a C++ runtime dependency.
 - The GUI has embedded class definitions, Preview/Dump/JSON switching and actual
   source normals/colors. Stale workers and settings are covered by targeted
   regressions. New independent reviews fixed wrapper-budget recovery, skin-node
@@ -100,3 +104,9 @@ GitHub-hosted run for this branch, including after PR creation; local success
 must not be reported as a hosted runner result. The migration is not a complete
 replacement for all 39 original game profiles. The feature/game matrices retain
 the remaining ports and acceptance requirements.
+
+The Endfield follow-up passed 1,015 workspace tests (14 optional external checks
+ignored), strict workspace Clippy, 58 focused game units and four game Session
+integrations. Its optimized CLI and actual Endfield profile probe passed; its
+optimized GUI still needs a fresh target build after cross-checkout ThinLTO
+cache corruption. See [local Codex handoff](LOCAL_CODEX_HANDOFF.md).

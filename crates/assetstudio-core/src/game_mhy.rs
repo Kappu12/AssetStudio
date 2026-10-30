@@ -1,4 +1,4 @@
-//! Canonical UnityFS reconstruction for the baseline Naraka/TOT/BH3PrePre paths.
+//! Canonical UnityFS reconstruction for the baseline custom game containers.
 //! Decryption can remove prefixes from compressed blocks, so block/table sizes
 //! are rewritten together rather than hiding an invalid block behind flags.
 
@@ -20,7 +20,7 @@ struct Header<'a> {
 }
 
 pub(super) fn normalize(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>> {
-    if profile != "TOT" {
+    if !matches!(profile, "TOT" | "ArknightsEndfield") {
         return normalize_single(input, profile, maximum);
     }
     ensure!(
@@ -68,12 +68,12 @@ fn standard_bundle_length(input: &[u8]) -> Result<usize> {
     let signature = reader.string(32)?;
     ensure!(
         matches!(signature, b"UnityFS" | b"UnityWeb" | b"UnityRaw" | b"ENCR"),
-        "Concatenated TOT unit has no UnityFS header"
+        "Concatenated game unit has no UnityFS header"
     );
     if signature != b"ENCR" {
         ensure!(
             (6..=8).contains(&reader.u32()?),
-            "Concatenated TOT unit uses an unknown version"
+            "Concatenated game unit uses an unknown version"
         );
         reader.string(32768)?;
         reader.string(32768)?;
@@ -250,8 +250,22 @@ fn normalize_single(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>
         let block = input.get(cursor..end).context("Game block is truncated")?;
         let decoded;
         let custom_lz4 = profile == "ExAstris" && matches!(flags & 0x3f, 4 | 5);
+        let inverted_lz4 = profile == "ArknightsEndfield" && flags & 0x3f == 5;
+        let fairguard =
+            profile == "ArknightsEndfield" && index == 0 && matches!(flags & 0x3f, 2 | 3 | 5);
         let mr0k_lz4 = matches!(profile, "TOT" | "BH3PrePre") && flags & 0x3f == 5;
-        let block = if custom_lz4 {
+        let block = if fairguard {
+            let mut transformed = super::copy_bytes(block)?;
+            super::fairguard::decrypt(&mut transformed);
+            if inverted_lz4 {
+                normalize_lz4_in_place(&mut transformed, usize::try_from(expanded)?, true)?;
+            }
+            decoded = transformed;
+            decoded.as_slice()
+        } else if inverted_lz4 {
+            decoded = normalize_lz4_inv(block, usize::try_from(expanded)?)?;
+            decoded.as_slice()
+        } else if custom_lz4 {
             decoded = normalize_lz4_lit(block, usize::try_from(expanded)?)?;
             decoded.as_slice()
         } else if mr0k_lz4 && block.starts_with(b"mr0k") {
@@ -261,7 +275,7 @@ fn normalize_single(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>
             block
         };
         let new_size = u32::try_from(block.len())?;
-        let new_flags = if custom_lz4 || mr0k_lz4 {
+        let new_flags = if custom_lz4 || inverted_lz4 || mr0k_lz4 {
             flags & !0x3f | 3
         } else {
             flags
@@ -321,13 +335,24 @@ fn normalize_single(input: &[u8], profile: &str, maximum: u64) -> Result<Vec<u8>
 /// the bounded compressed syntax to change those bytes, retaining offsets and
 /// literal data verbatim; the normal backend still performs decompression.
 fn normalize_lz4_lit(input: &[u8], expected: usize) -> Result<Vec<u8>> {
-    ensure!(!input.is_empty(), "LZ4Lit stream is empty");
     let mut output = super::copy_bytes(input)?;
+    normalize_lz4_in_place(&mut output, expected, false)?;
+    Ok(output)
+}
+
+fn normalize_lz4_inv(input: &[u8], expected: usize) -> Result<Vec<u8>> {
+    let mut output = super::copy_bytes(input)?;
+    normalize_lz4_in_place(&mut output, expected, true)?;
+    Ok(output)
+}
+
+fn normalize_lz4_in_place(input: &mut [u8], expected: usize, invert_offsets: bool) -> Result<()> {
+    ensure!(!input.is_empty(), "Custom LZ4 stream is empty");
     let mut cursor = 0_usize;
     let mut produced = 0_usize;
     while cursor < input.len() {
         let token = input[cursor];
-        output[cursor] = token.rotate_left(4);
+        input[cursor] = token.rotate_left(4);
         cursor += 1;
         let literal = extended_lz4_length(input, &mut cursor, usize::from(token & 15))?;
         cursor = cursor
@@ -347,12 +372,16 @@ fn normalize_lz4_lit(input: &[u8], expected: usize) -> Result<Vec<u8>> {
         let end = cursor
             .checked_add(2)
             .context("LZ4Lit offset range overflow")?;
-        let offset = u16::from_le_bytes(
-            input
-                .get(cursor..end)
-                .context("LZ4Lit back-reference is truncated")?
-                .try_into()?,
-        );
+        let offset_bytes = input
+            .get(cursor..end)
+            .context("Custom LZ4 back-reference is truncated")?
+            .try_into()?;
+        let offset = if invert_offsets {
+            input[cursor..end].reverse();
+            u16::from_be_bytes(offset_bytes)
+        } else {
+            u16::from_le_bytes(offset_bytes)
+        };
         cursor = end;
         ensure!(
             offset != 0 && usize::from(offset) <= produced,
@@ -370,7 +399,7 @@ fn normalize_lz4_lit(input: &[u8], expected: usize) -> Result<Vec<u8>> {
         produced == expected,
         "LZ4Lit decoded size differs from its declaration"
     );
-    Ok(output)
+    Ok(())
 }
 
 fn extended_lz4_length(input: &[u8], cursor: &mut usize, mut length: usize) -> Result<usize> {
@@ -587,13 +616,20 @@ mod tests {
         compression: u16,
         at_end: bool,
     ) -> (Vec<u8>, usize) {
+        blocks_fixture(&[(payload, expanded, compression)], at_end)
+    }
+
+    fn blocks_fixture(blocks: &[(&[u8], usize, u16)], at_end: bool) -> (Vec<u8>, usize) {
         let mut info = vec![0; 16];
-        info.extend_from_slice(&1_u32.to_be_bytes());
-        info.extend_from_slice(&(expanded as u32).to_be_bytes());
-        info.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        info.extend_from_slice(&compression.to_be_bytes());
+        info.extend_from_slice(&(blocks.len() as u32).to_be_bytes());
+        for (payload, expanded, compression) in blocks {
+            info.extend_from_slice(&(*expanded as u32).to_be_bytes());
+            info.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            info.extend_from_slice(&compression.to_be_bytes());
+        }
         info.extend_from_slice(&1_u32.to_be_bytes());
         info.extend_from_slice(&0_u64.to_be_bytes());
+        let expanded: usize = blocks.iter().map(|block| block.1).sum();
         info.extend_from_slice(&(expanded as u64).to_be_bytes());
         info.extend_from_slice(&0_u32.to_be_bytes());
         info.extend_from_slice(b"fixture.resS\0");
@@ -609,11 +645,15 @@ mod tests {
         result.extend_from_slice(&(if at_end { 0xc5u32 } else { 0x45u32 }).to_be_bytes());
         result.resize(result.len().next_multiple_of(16), 0);
         if at_end {
-            result.extend_from_slice(payload);
+            for (payload, _, _) in blocks {
+                result.extend_from_slice(payload);
+            }
             result.extend_from_slice(&encoded);
         } else {
             result.extend_from_slice(&encoded);
-            result.extend_from_slice(payload);
+            for (payload, _, _) in blocks {
+                result.extend_from_slice(payload);
+            }
         }
         let len = result.len() as u64;
         result[size..size + 8].copy_from_slice(&len.to_be_bytes());
@@ -623,6 +663,105 @@ mod tests {
         let parsed = UnityFsBundle::open(&Region::from_bytes(bundle)).unwrap();
         assert_eq!(parsed.entries.len(), 1);
         assert_eq!(parsed.read_entry(0).unwrap(), expected);
+    }
+
+    #[test]
+    fn endfield_original_fairguard_and_inverted_lz4_decode_through_real_bundle_reader() {
+        let normal =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-literal-lz4.encrypted");
+        let normal_output =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-literal-lz4.bin");
+        let inverted =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-literal-inv.encrypted");
+        let inverted_output =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-literal-inv.bin");
+        let overlap =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.encrypted");
+        let overlap_output =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.bin");
+        for (encoded, expected, compression) in [
+            (normal.as_slice(), normal_output.as_slice(), 2),
+            (normal.as_slice(), normal_output.as_slice(), 3),
+            (inverted.as_slice(), inverted_output.as_slice(), 5),
+            (overlap.as_slice(), overlap_output.as_slice(), 5),
+        ] {
+            for at_end in [false, true] {
+                let (bundle, _) = standard_fixture(encoded, expected.len(), compression, at_end);
+                assert_payload(
+                    normalize(&bundle, "ArknightsEndfield", 65536).unwrap(),
+                    expected,
+                );
+                assert!(
+                    normalize(&bundle, "ArknightsEndfield", expected.len() as u64 - 1).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn endfield_only_first_block_is_decrypted_and_every_inverted_offset_is_swapped() {
+        let first =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.encrypted");
+        let expected_first =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.bin");
+        let second = include_bytes!("../tests/fixtures/endfield-oracle/lz4inv-reference.inv");
+        let expected_second =
+            include_bytes!("../tests/fixtures/endfield-oracle/lz4inv-reference.bin");
+        let ordinary =
+            lz4_flex::block::compress(b"ordinary untouched second block with enough bytes");
+        let mut expected = expected_first.to_vec();
+        expected.extend_from_slice(expected_second);
+        expected.extend_from_slice(b"ordinary untouched second block with enough bytes");
+        for at_end in [false, true] {
+            let (bundle, _) = blocks_fixture(
+                &[
+                    (first, expected_first.len(), 5),
+                    (second, expected_second.len(), 5),
+                    (&ordinary, 49, 3),
+                ],
+                at_end,
+            );
+            assert_payload(
+                normalize(&bundle, "ArknightsEndfield", 65536).unwrap(),
+                &expected,
+            );
+        }
+        assert_eq!(
+            lz4_flex::block::decompress(&normalize_lz4_inv(second, 50).unwrap(), 50).unwrap(),
+            expected_second
+        );
+        for length in 0..second.len() {
+            assert!(normalize_lz4_inv(&second[..length], 50).is_err());
+        }
+        let mut malformed = second.to_vec();
+        malformed[9..11].copy_from_slice(&[0, 0]);
+        assert!(normalize_lz4_inv(&malformed, 50).is_err());
+        malformed[9..11].copy_from_slice(&[0xff, 0xff]);
+        assert!(normalize_lz4_inv(&malformed, 50).is_err());
+    }
+
+    #[test]
+    fn endfield_concatenation_restarts_fairguard_for_each_unit_and_preserves_offsets() {
+        let encrypted =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.encrypted");
+        let expected =
+            include_bytes!("../tests/fixtures/endfield-oracle/fairguard-overlap-inv.bin");
+        let (one, _) = standard_fixture(encrypted, expected.len(), 5, false);
+        let mut input = one.clone();
+        input.extend_from_slice(&one);
+        let normalized = normalize(&input, "ArknightsEndfield", 65536).unwrap();
+        let web = unity_rs_core::web_file::WebFile::open(Region::from_bytes(normalized)).unwrap();
+        assert_eq!(web.entries.len(), 2);
+        assert_eq!(web.entries[0].path, "bundle_0000000000000000.bundle");
+        assert_eq!(
+            web.entries[1].path,
+            format!("bundle_{:016x}.bundle", one.len())
+        );
+        for index in 0..2 {
+            assert_payload(web.read_entry(index).unwrap(), expected);
+        }
+        input.push(0);
+        assert!(normalize(&input, "ArknightsEndfield", 65536).is_err());
     }
 
     #[test]

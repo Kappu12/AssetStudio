@@ -182,6 +182,8 @@ pub struct BlendTreeNodeConstant {
     pub clip_id: u32,
     pub duration: f32,
     pub cycle_offset: f32,
+    /// Additional Endfield blend-tree metadata, absent in standard Unity.
+    pub state_name_hash: Option<u32>,
     pub mirror: bool,
 }
 
@@ -206,6 +208,8 @@ pub struct StateConstant {
     pub speed: f32,
     pub cycle_offset: f32,
     pub flags: StateFlags,
+    /// Endfield synchronization metadata (group ID, role), absent otherwise.
+    pub sync_group: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,6 +583,9 @@ impl ControllerReader {
         let clip_id = self.reader.read_u32()?;
         let duration = self.reader.read_f32()?;
         let cycle_offset = self.reader.read_f32()?;
+        let state_name_hash = (self.game_variant == GameVariant::ArknightsEndfield)
+            .then(|| self.reader.read_u32())
+            .transpose()?;
         let mirror = self.reader.read_bool()?;
         self.align(4)?;
         Ok(BlendTreeNodeConstant {
@@ -592,6 +599,7 @@ impl ControllerReader {
             clip_id,
             duration,
             cycle_offset,
+            state_name_hash,
             mirror,
         })
     }
@@ -637,6 +645,11 @@ impl ControllerReader {
         let write_default_values = self.reader.read_bool()?;
         let looped = self.reader.read_bool()?;
         let mirror = self.reader.read_bool()?;
+        let sync_group = if self.game_variant == GameVariant::ArknightsEndfield {
+            Some((self.reader.read_u32()?, self.reader.read_u32()?))
+        } else {
+            None
+        };
         self.align(4)?;
         Ok(StateConstant {
             transitions,
@@ -653,6 +666,7 @@ impl ControllerReader {
             speed,
             cycle_offset,
             flags: StateFlags::from_bools([ik_on_feet, write_default_values, looped, mirror]),
+            sync_group,
         })
     }
 
@@ -1087,6 +1101,7 @@ fn validate_supported_version(file: &SerializedFile) -> Result<VersionGateOutcom
 
 #[cfg(test)]
 mod tests {
+    use crate::game_variant::GameVariant;
     use crate::serialized::SerializedFile;
     use crate::source::Region;
 
@@ -1351,8 +1366,75 @@ mod tests {
         deep_controller_variant(endian, no_target, false)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn deep_controller_variant(endian: TestEndian, no_target: bool, lnd: bool) -> Vec<u8> {
+        deep_controller_profile(
+            endian,
+            no_target,
+            if lnd {
+                GameVariant::LoveAndDeepspace
+            } else {
+                GameVariant::Standard
+            },
+        )
+    }
+
+    #[test]
+    fn endfield_state_and_blend_metadata_preserves_following_controller_fields() {
+        for endian in [TestEndian::Little, TestEndian::Big] {
+            let object = deep_controller_profile(endian, false, GameVariant::ArknightsEndfield);
+            let parse = |bytes: &[u8]| {
+                let mut file = parse_asset(22, endian, 13, "2022.3.62f1", bytes);
+                file.game_variant = GameVariant::ArknightsEndfield;
+                file
+            };
+            let file = parse(&object);
+            let value = read_animator_controller(&file, 0, AnimatorControllerReadLimits::default())
+                .unwrap();
+            let state = &value.controller.state_machines[0].states[0];
+            assert_eq!(state.sync_group, Some((0x1234_5678, 0x8765_4321)));
+            assert_eq!(
+                state.blend_trees[0].nodes[0].state_name_hash,
+                Some(0xaabb_ccdd)
+            );
+            assert_eq!(state.blend_trees[0].nodes[0].clip_id, 14);
+            assert!(state.blend_trees[0].nodes[0].mirror);
+            assert_eq!(value.controller.values.values[0].id, 1001);
+            for end in 0..object.len() {
+                assert!(
+                    read_animator_controller(
+                        &parse(&object[..end]),
+                        0,
+                        AnimatorControllerReadLimits::default()
+                    )
+                    .is_err(),
+                    "truncation {end}"
+                );
+            }
+            assert!(
+                read_animator_controller(
+                    &file,
+                    0,
+                    AnimatorControllerReadLimits {
+                        maximum_total_allocation_bytes: 1,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
+            let standard = parse_asset(22, endian, 13, "2022.3.62f1", &object);
+            assert!(
+                read_animator_controller(&standard, 0, AnimatorControllerReadLimits::default())
+                    .is_err()
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn deep_controller_profile(
+        endian: TestEndian,
+        no_target: bool,
+        game_variant: GameVariant,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         push_named_object(&mut out, endian, no_target, "deep");
         endian.push_u32(&mut out, 0x1234);
@@ -1364,7 +1446,7 @@ mod tests {
         endian.push_i32(&mut out, 1);
         endian.push_u32(&mut out, 44);
         endian.push_f32(&mut out, 0.75);
-        if lnd {
+        if game_variant == GameVariant::LoveAndDeepspace {
             endian.push_i32(&mut out, 2);
             endian.push_u32(&mut out, 144);
             endian.push_f32(&mut out, 0.25);
@@ -1401,6 +1483,9 @@ mod tests {
         endian.push_u32(&mut out, 14);
         endian.push_f32(&mut out, 1.5);
         endian.push_f32(&mut out, 0.125);
+        if game_variant == GameVariant::ArknightsEndfield {
+            endian.push_u32(&mut out, 0xaabb_ccdd);
+        }
         out.push(1);
         align(&mut out, 4);
         for value in 801..=808 {
@@ -1409,6 +1494,10 @@ mod tests {
         endian.push_f32(&mut out, 1.25);
         endian.push_f32(&mut out, 0.5);
         out.extend_from_slice(&[1, 1, 0, 1]);
+        if game_variant == GameVariant::ArknightsEndfield {
+            endian.push_u32(&mut out, 0x1234_5678);
+            endian.push_u32(&mut out, 0x8765_4321);
+        }
         align(&mut out, 4);
 
         endian.push_i32(&mut out, 0);

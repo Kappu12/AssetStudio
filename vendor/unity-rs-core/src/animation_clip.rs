@@ -867,6 +867,11 @@ impl AnimationClipReader {
 
         let sample_rate = self.reader.read_f32()?;
         let wrap_mode = self.reader.read_i32()?;
+        if self.game_variant == crate::game_variant::GameVariant::ArknightsEndfield {
+            // Endfield stores the clip-wide mode here, rather than before
+            // the Euler curve list as Ex Astris does.
+            let _acl_type = self.reader.read_i32()?;
+        }
         let bounds = self.read_aabb()?;
         if self.is_tuanjie && self.version >= (2022, 3, 61) {
             euler_curves = self.read_vector3_curve_list("AnimationClip relocated Euler curve")?;
@@ -1584,8 +1589,12 @@ impl AnimationClipReader {
         let sample_rate_bits = self.reader.read_u32()?;
         let begin_time_bits = self.reader.read_u32()?;
         let mut samples = self.read_f32_array("AnimationClip dense sample", true)?;
-        if self.game_variant == crate::game_variant::GameVariant::ExAstris {
-            samples = self.read_exastris_dense_samples(frame_count, curve_count, samples)?;
+        if matches!(
+            self.game_variant,
+            crate::game_variant::GameVariant::ExAstris
+                | crate::game_variant::GameVariant::ArknightsEndfield
+        ) {
+            samples = self.read_game_dense_samples(frame_count, curve_count, samples)?;
         }
         Ok(DenseClip {
             frame_count,
@@ -1596,113 +1605,129 @@ impl AnimationClipReader {
         })
     }
 
-    fn read_exastris_dense_samples(
+    fn read_game_dense_samples(
         &mut self,
         frame_count: usize,
         curve_count: u32,
         resident: F32Array,
     ) -> Result<F32Array> {
         let bit_count = self.reader.read_i32()?;
+        let is_endfield = self.game_variant == crate::game_variant::GameVariant::ArknightsEndfield;
+        let endfield_packed = if is_endfield {
+            Some(self.read_byte_region("Endfield dense quantized samples", true)?)
+        } else {
+            None
+        };
         let mut counts = [0_u32; 5];
-        for count in &mut counts {
-            *count = self.reader.read_u32()?;
-            self.validate_u32_count(*count, "ExAstris dense curve group")?;
+        if !is_endfield {
+            for count in &mut counts {
+                *count = self.reader.read_u32()?;
+                self.validate_u32_count(*count, "game dense curve group")?;
+            }
         }
         let mut factors = [0.0_f32; 4];
         for factor in &mut factors {
             *factor = self.reader.read_f32()?;
             if !factor.is_finite() {
-                return Err(Error::invalid_data("ExAstris dense factor is non-finite"));
+                return Err(Error::invalid_data("game dense factor is non-finite"));
             }
         }
-        let packed = self.read_byte_region("ExAstris dense quantized samples", true)?;
+        let packed = if let Some(packed) = endfield_packed {
+            for count in &mut counts[..4] {
+                *count = self.reader.read_u32()?;
+                self.validate_u32_count(*count, "Endfield dense curve group")?;
+            }
+            packed
+        } else {
+            self.read_byte_region("game dense quantized samples", true)?
+        };
         if bit_count == 0 || resident.count != 0 {
             // This is also the original reader's precedence rule: a complete
             // resident sample array is authoritative when both are present.
-            let expected =
-                frame_count
-                    .checked_mul(usize::try_from(curve_count).map_err(|_| {
-                        Error::invalid_data("ExAstris dense curve count overflowed")
-                    })?)
-                    .ok_or_else(|| Error::invalid_data("ExAstris dense sample size overflowed"))?;
+            let expected = frame_count
+                .checked_mul(
+                    usize::try_from(curve_count)
+                        .map_err(|_| Error::invalid_data("game dense curve count overflowed"))?,
+                )
+                .ok_or_else(|| Error::invalid_data("game dense sample size overflowed"))?;
             if resident.count != expected {
                 return Err(Error::invalid_data(
-                    "ExAstris resident dense sample count disagrees with its frames/curves",
+                    "game resident dense sample count disagrees with its frames/curves",
                 ));
             }
             return Ok(resident);
         }
         if !matches!(bit_count, 8 | 16 | 24 | 32) {
             return Err(Error::unsupported(format!(
-                "ExAstris dense quantization width {bit_count} is not a whole 8–32 bit value"
+                "game dense quantization width {bit_count} is not a whole 8–32 bit value"
             )));
         }
         if counts[4] != 0 {
             return Err(Error::unsupported(
-                "ExAstris quantized generic channels need a separately verified layout",
+                "game quantized generic channels need a separately verified layout",
             ));
         }
         let grouped = counts[..4].iter().try_fold(0_u32, |total, &count| {
             total
                 .checked_add(count)
-                .ok_or_else(|| Error::invalid_data("ExAstris dense group curve count overflowed"))
+                .ok_or_else(|| Error::invalid_data("game dense group curve count overflowed"))
         })?;
         if grouped > curve_count {
             return Err(Error::invalid_data(
-                "ExAstris dense curve groups exceed the declared curve count",
+                "game dense curve groups exceed the declared curve count",
             ));
         }
         let width = usize::try_from(bit_count / 8)
-            .map_err(|_| Error::invalid_data("ExAstris dense quantization width overflowed"))?;
+            .map_err(|_| Error::invalid_data("game dense quantization width overflowed"))?;
         let curves = usize::try_from(curve_count)
-            .map_err(|_| Error::invalid_data("ExAstris dense curve count overflowed"))?;
-        let count = frame_count.checked_mul(curves).ok_or_else(|| {
-            Error::invalid_data("ExAstris expanded dense sample count overflowed")
-        })?;
+            .map_err(|_| Error::invalid_data("game dense curve count overflowed"))?;
+        let count = frame_count
+            .checked_mul(curves)
+            .ok_or_else(|| Error::invalid_data("game expanded dense sample count overflowed"))?;
         if count > self.limits.maximum_sample_values {
             return Err(Error::invalid_data(
-                "ExAstris expanded dense samples exceed the sample limit",
+                "game expanded dense samples exceed the sample limit",
             ));
         }
         self.budget.sample_values = self
             .budget
             .sample_values
             .checked_add(count)
-            .ok_or_else(|| Error::invalid_data("ExAstris expanded sample budget overflowed"))?;
+            .ok_or_else(|| Error::invalid_data("game expanded sample budget overflowed"))?;
         if self.budget.sample_values > self.limits.maximum_total_sample_values {
             return Err(Error::invalid_data(
-                "ExAstris expanded dense samples exceed the shared sample limit",
+                "game expanded dense samples exceed the shared sample limit",
             ));
         }
         let packed_bytes = count
             .checked_mul(width)
-            .ok_or_else(|| Error::invalid_data("ExAstris dense packed size overflowed"))?;
+            .ok_or_else(|| Error::invalid_data("game dense packed size overflowed"))?;
         if u64::try_from(packed_bytes).ok() != Some(packed.byte_length) {
             return Err(Error::invalid_data(
-                "ExAstris quantized dense payload size disagrees with its frames/curves",
+                "game quantized dense payload size disagrees with its frames/curves",
             ));
         }
-        self.charge_allocation(packed.byte_length, "ExAstris encoded dense samples")?;
+        self.charge_allocation(packed.byte_length, "game encoded dense samples")?;
         let packed = packed.read(self.limits.maximum_packed_bytes)?;
         let output_bytes = count
             .checked_mul(4)
-            .ok_or_else(|| Error::invalid_data("ExAstris decoded dense size overflowed"))?;
-        let mut output = self.reserve::<u8>(output_bytes, "ExAstris decoded dense samples")?;
+            .ok_or_else(|| Error::invalid_data("game decoded dense size overflowed"))?;
+        let mut output = self.reserve::<u8>(output_bytes, "game decoded dense samples")?;
         // ByteArrayExtensions.ToUInt4Array followed by ToUInt8Array restores
         // the original bytes; BitConverter then reads each word little-endian,
         // independently of the enclosing SerializedFile byte order.
         let maximum = ((1_u64 << bit_count) - 1) as f32;
         let position_end = usize::try_from(counts[0])
-            .map_err(|_| Error::invalid_data("ExAstris position group width overflowed"))?;
+            .map_err(|_| Error::invalid_data("game position group width overflowed"))?;
         let rotation_end = position_end
             + usize::try_from(counts[1])
-                .map_err(|_| Error::invalid_data("ExAstris rotation group width overflowed"))?;
+                .map_err(|_| Error::invalid_data("game rotation group width overflowed"))?;
         let euler_end = rotation_end
             + usize::try_from(counts[2])
-                .map_err(|_| Error::invalid_data("ExAstris Euler group width overflowed"))?;
+                .map_err(|_| Error::invalid_data("game Euler group width overflowed"))?;
         let scale_end = euler_end
             + usize::try_from(counts[3])
-                .map_err(|_| Error::invalid_data("ExAstris scale group width overflowed"))?;
+                .map_err(|_| Error::invalid_data("game scale group width overflowed"))?;
         for (index, bytes) in packed.chunks_exact(width).enumerate() {
             let mut encoded = [0_u8; 8];
             encoded[..width].copy_from_slice(bytes);
@@ -1726,7 +1751,7 @@ impl AnimationClipReader {
             };
             if !decoded.is_finite() {
                 return Err(Error::invalid_data(
-                    "ExAstris decoded dense sample is non-finite",
+                    "game decoded dense sample is non-finite",
                 ));
             }
             output.extend_from_slice(&decoded.to_le_bytes());
@@ -2516,69 +2541,207 @@ mod tests {
     }
 
     #[test]
-    fn exastris_complete_clip_consumes_header_and_dense_extension() {
+    fn endfield_dense_quantization_uses_payload_before_factors_and_four_group_counts() {
         for endian in [Endian::Little, Endian::Big] {
-            let mut output = Vec::new();
-            push_string(&mut output, "ExAstris Clip", endian);
-            output.extend_from_slice(&[0, 1, 1]);
-            align(&mut output, 4);
-            for _ in 0..2 {
-                push_i32(&mut output, 0, endian);
+            for bits in [8_i32, 16, 24, 32] {
+                let width = usize::try_from(bits / 8).unwrap();
+                let mut payload = Vec::new();
+                push_i32(&mut payload, 2, endian);
+                push_u32(&mut payload, 5, endian);
+                push_floats(&mut payload, &[30.0, 0.25], endian);
+                push_f32_array(&mut payload, &[], endian);
+                push_i32(&mut payload, bits, endian);
+                let mut packed = vec![0; width * 5];
+                packed.extend_from_slice(&vec![255; width * 5]);
+                push_bytes_array(&mut payload, &packed, endian);
+                push_floats(&mut payload, &[10.0, 30.0, 2.0, 5.0], endian);
+                for count in [1, 1, 1, 1] {
+                    push_u32(&mut payload, count, endian);
+                }
+                let parse = |bytes: &[u8], limits| {
+                    let mut file = parse_asset(22, endian, 13, "2022.3.62f1", bytes);
+                    file.game_variant = crate::game_variant::GameVariant::ArknightsEndfield;
+                    super::AnimationClipReader::new(&file, 0, limits)?.read_dense_clip()
+                };
+                let dense = parse(&payload, AnimationClipReadLimits::default()).unwrap();
+                assert_eq!(
+                    dense.samples.read_values(10).unwrap(),
+                    [-10.0, -1.0, -30.0, -2.0, -5.0, 10.0, 1.0, 30.0, 2.0, 5.0]
+                );
+                for limits in [
+                    AnimationClipReadLimits {
+                        maximum_sample_values: 9,
+                        ..Default::default()
+                    },
+                    AnimationClipReadLimits {
+                        maximum_total_sample_values: 9,
+                        ..Default::default()
+                    },
+                    AnimationClipReadLimits {
+                        maximum_total_allocation_bytes: 20,
+                        ..Default::default()
+                    },
+                ] {
+                    assert!(parse(&payload, limits).is_err());
+                }
+                for end in 0..payload.len() {
+                    assert!(
+                        parse(&payload[..end], AnimationClipReadLimits::default()).is_err(),
+                        "truncation {end}"
+                    );
+                }
+                if bits == 8 {
+                    for (offset, replacement) in
+                        [(20, 4_u32), (24, 9), (40, f32::NAN.to_bits()), (56, 6)]
+                    {
+                        let mut bad = payload.clone();
+                        let encoded = match endian {
+                            Endian::Little => replacement.to_le_bytes(),
+                            Endian::Big => replacement.to_be_bytes(),
+                        };
+                        bad[offset..offset + 4].copy_from_slice(&encoded);
+                        assert!(
+                            parse(&bad, AnimationClipReadLimits::default()).is_err(),
+                            "offset {offset}"
+                        );
+                    }
+                }
             }
-            push_i32(&mut output, 8, endian); // ExAstris header ACL mode.
-            for _ in 0..5 {
-                push_i32(&mut output, 0, endian);
+        }
+    }
+
+    #[test]
+    fn endfield_complete_clip_consumes_post_wrap_acl_mode_and_dense_extension() {
+        for endian in [Endian::Little, Endian::Big] {
+            let variant = crate::game_variant::GameVariant::ArknightsEndfield;
+            let object = quantized_complete_clip_fixture(endian, variant);
+            let parse = |bytes: &[u8]| {
+                let mut file = parse_asset(22, endian, 13, "2022.3.62f1", bytes);
+                file.game_variant = variant;
+                file
+            };
+            let file = parse(&object);
+            let value = read_animation_clip(&file, 0, AnimationClipReadLimits::default()).unwrap();
+            assert_eq!(value.name, "Quantized Clip");
+            assert_eq!(value.bounds.center.x, 1.0);
+            assert_eq!(value.bounds.extent.z, 6.0);
+            let muscle = value.muscle_clip.unwrap();
+            let dense = &muscle.clip.dense;
+            let samples = dense.samples.read_values(6).unwrap();
+            assert_eq!(samples[0], -10.0);
+            assert_eq!(samples[2], 10.0);
+            assert_eq!(samples[3], 10.0);
+            assert_eq!(samples[5], -10.0);
+            for end in 0..object.len() {
+                assert!(
+                    read_animation_clip(
+                        &parse(&object[..end]),
+                        0,
+                        AnimationClipReadLimits::default()
+                    )
+                    .is_err(),
+                    "truncation {end}"
+                );
             }
-            push_f32(&mut output, 30.0, endian);
-            push_i32(&mut output, 0, endian);
-            push_floats(&mut output, &[0.0; 6], endian);
-            push_u32(&mut output, 0, endian);
-            push_xform(&mut output, endian);
-            push_floats(&mut output, &[0.0; 7], endian);
-            push_i32(&mut output, 0, endian);
-            push_hand_pose(&mut output, endian, false);
-            push_hand_pose(&mut output, endian, false);
-            push_f32_array(&mut output, &[], endian);
-            push_i32(&mut output, 0, endian);
-            for _ in 0..4 {
-                push_xform(&mut output, endian);
+            let standard = parse_asset(22, endian, 13, "2022.3.62f1", &object);
+            assert!(read_animation_clip(&standard, 0, AnimationClipReadLimits::default()).is_err());
+            if endian == Endian::Little
+                && let Some(path) = std::env::var_os("ASSETSTUDIO_ENDFIELD_CLIP_FIXTURE")
+            {
+                let bytes = synthetic_v22(endian, 13, "2022.3.62f1", &object);
+                std::fs::write(path, bytes).unwrap();
             }
-            push_floats(&mut output, &[0.0; 3], endian);
-            push_u32_array(&mut output, &[], endian);
-            push_u16(&mut output, 0, endian);
-            push_u16(&mut output, 0, endian);
-            push_i32(&mut output, 2, endian);
-            push_u32(&mut output, 3, endian);
-            push_floats(&mut output, &[30.0, 0.0], endian);
-            push_f32_array(&mut output, &[], endian);
+        }
+    }
+
+    fn quantized_complete_clip_fixture(
+        endian: Endian,
+        variant: crate::game_variant::GameVariant,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        push_string(&mut output, "Quantized Clip", endian);
+        output.extend_from_slice(&[0, 1, 1]);
+        align(&mut output, 4);
+        for _ in 0..2 {
+            push_i32(&mut output, 0, endian);
+        }
+        if variant == crate::game_variant::GameVariant::ExAstris {
             push_i32(&mut output, 8, endian);
+        }
+        for _ in 0..5 {
+            push_i32(&mut output, 0, endian);
+        }
+        push_f32(&mut output, 30.0, endian);
+        push_i32(&mut output, 0, endian);
+        if variant == crate::game_variant::GameVariant::ArknightsEndfield {
+            push_i32(&mut output, 8, endian);
+        }
+        push_floats(&mut output, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], endian);
+        push_u32(&mut output, 0, endian);
+        push_xform(&mut output, endian);
+        push_floats(&mut output, &[0.0; 7], endian);
+        push_i32(&mut output, 0, endian);
+        push_hand_pose(&mut output, endian, false);
+        push_hand_pose(&mut output, endian, false);
+        push_f32_array(&mut output, &[], endian);
+        push_i32(&mut output, 0, endian);
+        for _ in 0..4 {
+            push_xform(&mut output, endian);
+        }
+        push_floats(&mut output, &[0.0; 3], endian);
+        push_u32_array(&mut output, &[], endian);
+        push_u16(&mut output, 0, endian);
+        push_u16(&mut output, 0, endian);
+        push_i32(&mut output, 2, endian);
+        push_u32(&mut output, 3, endian);
+        push_floats(&mut output, &[30.0, 0.0], endian);
+        push_f32_array(&mut output, &[], endian);
+        push_i32(&mut output, 8, endian);
+        if variant == crate::game_variant::GameVariant::ArknightsEndfield {
+            push_bytes_array(&mut output, &[0, 128, 255, 255, 128, 0], endian);
+        } else {
             for count in [3, 0, 0, 0, 0] {
                 push_u32(&mut output, count, endian);
             }
-            push_floats(&mut output, &[10.0, 1.0, 1.0, 1.0], endian);
+        }
+        push_floats(&mut output, &[10.0, 1.0, 1.0, 1.0], endian);
+        if variant == crate::game_variant::GameVariant::ArknightsEndfield {
+            for count in [3, 0, 0, 0] {
+                push_u32(&mut output, count, endian);
+            }
+        } else {
             push_bytes_array(&mut output, &[0, 128, 255, 255, 128, 0], endian);
-            push_f32_array(&mut output, &[], endian); // ConstantClip.
-            push_floats(&mut output, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0], endian);
-            push_i32_array(&mut output, &[], endian);
-            push_i32(&mut output, 0, endian);
-            push_f32_array(&mut output, &[], endian);
-            output.extend_from_slice(&[0; 11]);
-            align(&mut output, 4);
-            push_i32(&mut output, 1, endian);
-            push_u32(&mut output, 0, endian);
-            push_u32(&mut output, 1, endian);
-            push_pptr(&mut output, 0, 0, 22, endian);
-            push_i32(&mut output, 4, endian);
-            output.extend_from_slice(&[4, 0, 0, 0]);
-            push_i32(&mut output, 0, endian);
-            output.extend_from_slice(&[0, 0]);
-            align(&mut output, 4);
-            push_i32(&mut output, 0, endian);
-            align(&mut output, 4);
+        }
+        push_f32_array(&mut output, &[], endian); // ConstantClip.
+        push_floats(&mut output, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0], endian);
+        push_i32_array(&mut output, &[], endian);
+        push_i32(&mut output, 0, endian);
+        push_f32_array(&mut output, &[], endian);
+        output.extend_from_slice(&[0; 11]);
+        align(&mut output, 4);
+        push_i32(&mut output, 1, endian);
+        push_u32(&mut output, 0, endian);
+        push_u32(&mut output, 1, endian);
+        push_pptr(&mut output, 0, 0, 22, endian);
+        push_i32(&mut output, 4, endian);
+        output.extend_from_slice(&[4, 0, 0, 0]);
+        push_i32(&mut output, 0, endian);
+        output.extend_from_slice(&[0, 0]);
+        align(&mut output, 4);
+        push_i32(&mut output, 0, endian);
+        align(&mut output, 4);
+        output
+    }
+
+    #[test]
+    fn exastris_complete_clip_consumes_header_and_dense_extension() {
+        for endian in [Endian::Little, Endian::Big] {
+            let variant = crate::game_variant::GameVariant::ExAstris;
+            let output = quantized_complete_clip_fixture(endian, variant);
             let mut file = parse_asset(22, endian, 13, "2022.3.62f1", &output);
             file.game_variant = crate::game_variant::GameVariant::ExAstris;
             let clip = read_animation_clip(&file, 0, AnimationClipReadLimits::default()).unwrap();
-            assert_eq!(clip.name, "ExAstris Clip");
+            assert_eq!(clip.name, "Quantized Clip");
             assert_eq!(clip.binding_constant.generic_bindings.len(), 1);
             let values = clip
                 .muscle_clip
