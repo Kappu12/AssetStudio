@@ -80,3 +80,8 @@ quantized dense ordering. Both-endian fixtures check truncations and budgets.
 Collision-baked meshes fail triangle export explicitly, matching the baseline
 which skips triangle conversion for that layout. App wrappers have original C#
 FairGuard/LZ4Inv oracles and real Session material/animation export checks.
+
+An experimental ACL 1.1 decoder and differential fixtures are retained for
+continuation, but `acl_legacy.rs` is unregistered and is not part of the built
+library or normal Cargo test run. Unity adapters are still pending. See
+`docs/LOCAL_CODEX_HANDOFF.md` at the repository root for its exact status.
