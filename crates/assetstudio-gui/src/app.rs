@@ -3221,47 +3221,53 @@ fn checked_color_image(width: u32, height: u32, rgba: &[u8]) -> Result<egui::Col
     ))
 }
 
-fn hierarchy_order(nodes: &[SceneNode]) -> Vec<(usize, usize)> {
-    let mut children = BTreeMap::<Option<AssetKey>, Vec<usize>>::new();
-    let keys: HashSet<_> = nodes.iter().map(|node| node.key).collect();
-    for (index, node) in nodes.iter().enumerate() {
-        let parent = node.parent.filter(|key| keys.contains(key));
-        children.entry(parent).or_default().push(index);
-    }
-    for siblings in children.values_mut() {
-        siblings.sort_by(|&left, &right| {
-            nodes[left]
-                .name
-                .cmp(&nodes[right].name)
-                .then_with(|| nodes[left].key.cmp(&nodes[right].key))
-        });
-    }
-    let mut stack: Vec<_> = children
-        .get(&None)
-        .into_iter()
-        .flatten()
-        .rev()
-        .map(|&index| (index, 0_usize))
+pub(crate) fn hierarchy_order(nodes: &[SceneNode]) -> Vec<(usize, usize)> {
+    let by_key: HashMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.key, index))
         .collect();
-    let mut visited = HashSet::new();
+    let mut children = vec![Vec::new(); nodes.len()];
+    let mut roots = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(&parent) = node.parent.as_ref().and_then(|key| by_key.get(key)) {
+            children[parent].push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+    let compare = |&left: &usize, &right: &usize| {
+        nodes[left]
+            .name
+            .cmp(&nodes[right].name)
+            .then_with(|| nodes[left].key.cmp(&nodes[right].key))
+    };
+    roots.sort_unstable_by(compare);
+    for siblings in &mut children {
+        siblings.sort_unstable_by(compare);
+    }
+    let mut stack: Vec<_> = roots
+        .into_iter()
+        .rev()
+        .map(|index| (index, 0_usize))
+        .collect();
+    let mut visited = vec![false; nodes.len()];
     let mut output = Vec::with_capacity(nodes.len());
     while let Some((index, depth)) = stack.pop() {
-        if !visited.insert(nodes[index].key) {
+        if std::mem::replace(&mut visited[index], true) {
             continue;
         }
         output.push((index, depth));
-        if let Some(descendants) = children.get(&Some(nodes[index].key)) {
-            stack.extend(
-                descendants
-                    .iter()
-                    .rev()
-                    .map(|&child| (child, depth.saturating_add(1))),
-            );
-        }
+        stack.extend(
+            children[index]
+                .iter()
+                .rev()
+                .map(|&child| (child, depth.saturating_add(1))),
+        );
     }
     // A defensive fallback keeps broken/orphaned cycles visible without recursing.
-    for (index, node) in nodes.iter().enumerate() {
-        if visited.insert(node.key) {
+    for (index, seen) in visited.into_iter().enumerate() {
+        if !seen {
             output.push((index, 0));
         }
     }
@@ -3376,6 +3382,78 @@ pub fn smoke_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_widgets_toggle_multiple_checks_and_cycle_sort_without_losing_them() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        app.classes = BTreeMap::from([("Mesh".into(), 4), ("Texture2D".into(), 7)]);
+        let render = |app: &mut StudioApp, events| {
+            context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| app.sidebar(ui));
+                },
+            )
+        };
+        let mut output = render(&mut app, vec![]);
+        let mut click = |app: &mut StudioApp, label: &str| {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.pos + egui::vec2(3.0, 5.0))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing type control {label}"));
+            output = render(
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            // Refresh the changed label/order before choosing the next control.
+            output = render(app, vec![]);
+        };
+        click(&mut app, "Mesh  4");
+        click(&mut app, "Texture2D  7");
+        assert_eq!(
+            app.filters.classes,
+            std::collections::BTreeSet::from(["Mesh".into(), "Texture2D".into()])
+        );
+        click(&mut app, "A");
+        assert_eq!(app.type_sort.label(), "↓");
+        click(&mut app, "↓");
+        assert_eq!(app.type_sort.label(), "↑");
+        click(&mut app, "Mesh  4");
+        assert_eq!(
+            app.filters.classes,
+            std::collections::BTreeSet::from(["Texture2D".into()])
+        );
+        click(&mut app, "All types (0)");
+        assert!(app.filters.classes.is_empty());
+    }
 
     #[test]
     fn worker_progress_is_painted_in_the_footer_and_clears_after_failure() {

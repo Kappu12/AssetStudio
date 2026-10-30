@@ -996,6 +996,11 @@ fn selected_models_ignore_unrelated_catalog_size_and_malformed_renderers() {
     assert!(!report.written.is_empty());
     // The complete-scene operation still reports corrupt geometry in its scope.
     assert!(session.scene().is_err());
+    // Browsing topology does not decode unrelated renderer payloads.
+    assert_eq!(
+        session.scene_outline_with_progress(None).unwrap().len(),
+        20_002
+    );
 }
 
 #[test]

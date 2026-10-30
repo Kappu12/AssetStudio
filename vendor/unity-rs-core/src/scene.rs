@@ -454,7 +454,7 @@ impl SceneObjectReader {
             Endian::Big
         };
         Ok(Self {
-            reader: EndianReader::new(region.cursor(), endian),
+            reader: EndianReader::new(region.buffered_cursor(1024), endian),
             region,
             absolute_start: object.byte_start,
             path_id: object.path_id,

@@ -823,6 +823,10 @@ mod tests {
             nodes.len(),
             now.elapsed()
         );
+        let now = Instant::now();
+        let rows = crate::app::hierarchy_order(&nodes);
+        assert_eq!(rows.len(), nodes.len());
+        println!("Order hierarchy rows: {:?}", now.elapsed());
     }
 
     #[test]

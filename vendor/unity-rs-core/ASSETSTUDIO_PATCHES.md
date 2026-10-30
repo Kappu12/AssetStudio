@@ -114,3 +114,16 @@ Optional worker-thread progress observers report file reads and metadata indexin
 without changing the existing load entry points. Counts describe completed work
 within each named phase; phases with unknown totals remain indeterminate. The
 application adds catalog, browser preparation and export progress for its footer.
+
+## Browser performance
+
+An explicit topology-only hierarchy entry point skips renderer, material, skin
+and Animator payloads. It retains Transform parent resolution, last-component
+ordering, collection budgets and cycle checks. Full model hierarchy entry points
+retain their existing decoding and failure behavior.
+
+Selected metadata/container/name/scene readers use independent bounded read-ahead
+cursors (at most 64 KiB). Logical seeks and length checks preserve each cursor's
+window; large reads bypass it. Region bounds and read budgets still apply. Cursor
+regressions check partial reads, window boundaries, seeks, EOF, exact source ranges
+and fewer underlying reads. This avoids one Windows seek/read per scalar field.

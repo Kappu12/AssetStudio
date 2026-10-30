@@ -294,7 +294,7 @@ fn open_serialized_metadata(
     Ok(OpenSerializedMetadata {
         header,
         metadata_start,
-        reader: EndianReader::new(metadata.cursor(), endian),
+        reader: EndianReader::new(metadata.buffered_cursor(64 * 1024), endian),
         budget: SerializedParseBudget::default(),
     })
 }
@@ -1046,7 +1046,7 @@ impl ContainerObjectReader {
             Endian::Big
         };
         let mut result = Self {
-            reader: EndianReader::new(payload.cursor(), endian),
+            reader: EndianReader::new(payload.buffered_cursor(64 * 1024), endian),
             format_version: file.header.version.0,
             no_target: file.target_platform == NO_TARGET_PLATFORM,
             limits,

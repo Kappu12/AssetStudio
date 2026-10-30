@@ -1,3 +1,30 @@
+# Desktop type filters and performance — 2026-10-30 Windows
+
+The desktop has a #090909/white theme and persistent worker progress footer.
+Types now support independent checkboxes, case-insensitive search and an A/↓/↑
+cycle for alphabetical/most/fewest ordering. All types clears the checked filters.
+Search and sorting the type list preserve checked types. Headless pointer-input
+tests exercise the actual checkbox and sort controls.
+
+Session metadata is shared with the browser through immutable Arc snapshots;
+metadata recovery uses copy on write. Name ordering and per-type rank buckets
+avoid repeated full catalog sorts. Pending filters retain the displayed rows.
+Ordinary asset selection avoids constructing millions of ordered keys. Hierarchy
+row ordering uses indexed adjacency and iterative traversal. The browser's explicit
+topology reader skips model payloads, retaining graph budgets and cycle checks;
+Session::scene and model/export readers retain their original full validation.
+
+Bounded read-ahead cursors cache metadata/container/name/scene fields across
+logical seeks, reducing Windows file calls. Scalar/bulk/boundary/EOF regressions
+pass. Full workspace: 1,017 tests passed, 16 ignored (14 external and two optional
+local performance probes); strict Clippy, formatting and release build pass.
+
+Real corpus probe logs are ignored under target/acceptance/browser-*.log. The
+final 6,591,789-asset load took about 22 seconds, index preparation four seconds,
+all rows 6.7 ms, Mesh 0.24 ms, Mesh+Texture2D 1.7 ms. All indexed rows matched the
+reference. Content hierarchy reading improved from 37.5 seconds to 3.8–5.1 seconds.
+No remote push is authorized. Earlier checkpoints follow.
+
 # Facepunch Rust checkpoint — 2026-10-30 Windows
 
 The user chose **finish the Facepunch Rust workflow first**; unrelated game-profile

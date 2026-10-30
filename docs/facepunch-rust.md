@@ -12,8 +12,12 @@ is the native CLI; `Build/AssetStudio.CLI.exe` is its compatibility entry point.
 Previous launcher executables are retained as `.pre-rust.bak` files.
 
 The desktop uses a `#090909` background with white controls. After loading, select
-**Mesh**, **Texture2D**, **AudioClip**, or another entry under **Types** in the left
-sidebar. **All types** clears that filter; the search box further narrows the list.
+**Mesh**, **Texture2D**, **AudioClip**, or multiple checkboxes under **Types** in the
+left sidebar. Checked types are combined; **All types** clears those selections.
+**Search types** searches the type names without changing the checked types.
+The button next to **Types** cycles **A** (alphabetical), **↓** (most assets first)
+and **↑** (fewest assets first). Ties remain alphabetical. The asset-name search
+box above the list further narrows the matching assets.
 Use **GameObject** or **Animator** for complete models rather than individual meshes.
 Additional formats and grouping controls are under **Export options**.
 
@@ -21,6 +25,21 @@ The bottom progress bar stays visible during background operations. Opening asse
 reports file, asset-name, catalog and browser preparation counts; asset exports
 report processed items. Percentages apply to the current named stage. Stages with
 no known total show an animated bar and elapsed time.
+
+Browser metadata shares the loaded session instead of copying every asset string.
+Name ordering and type buckets are built once; changing type or name filters reuses
+them. Existing rows remain visible while a new filter runs. The hierarchy browser
+reads GameObjects and Transforms without decoding renderer/material/skin payloads;
+model previews and exports retain the full model readers and their validation.
+Bounded read-ahead buffers reduce small Windows file reads during metadata,
+container, name and scene parsing.
+
+Local optimized Windows checks on this corpus restored 6,591,789 visible rows in
+about 7 ms, filtered 56,733 meshes in about 0.24 ms, and combined Mesh/Texture2D in
+about 1.7 ms; indexed results matched the reference filter exactly. Initial loading
+took about 22 seconds plus four seconds to prepare browser indexes. On the content
+bundle sample, reading 245,936 hierarchy nodes fell from 37.5 seconds to about
+3.8–5.1 seconds. Timings depend on storage, file caching and available memory.
 
 Open the complete `A:\Blender\Rust_Assets` folder to resolve models' external
 texture CABs. Opening only `content.bundle_unpacked` provides geometry but leaves

@@ -132,7 +132,24 @@ impl Region {
         RegionCursor {
             region: self.clone(),
             position: 0,
+            buffer: None,
         }
+    }
+
+    /// Small metadata reads share a bounded read-ahead window. Logical seeks,
+    /// including length checks, preserve that window; bulk payload reads bypass
+    /// it. The immutable source and this region's bounds remain authoritative.
+    pub(crate) fn buffered_cursor(&self, capacity: usize) -> RegionCursor {
+        let mut cursor = self.cursor();
+        cursor.buffer = Some(CursorBuffer {
+            bytes: Vec::new(),
+            start: 0,
+            filled: 0,
+            capacity: capacity
+                .clamp(1, 64 * 1024)
+                .min(usize::try_from(self.len()).unwrap_or(usize::MAX)),
+        });
+        cursor
     }
 
     pub fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<()> {
@@ -230,6 +247,14 @@ impl Eq for Region {}
 pub struct RegionCursor {
     region: Region,
     position: u64,
+    buffer: Option<CursorBuffer>,
+}
+
+struct CursorBuffer {
+    bytes: Vec<u8>,
+    start: u64,
+    filled: usize,
+    capacity: usize,
 }
 
 impl RegionCursor {
@@ -252,10 +277,39 @@ impl Read for RegionCursor {
         if count == 0 {
             return Ok(0);
         }
-        self.region
-            .read_exact_at_io(self.position, &mut output[..count])?;
-        self.position += u64::try_from(count).expect("read count fits in u64");
-        Ok(count)
+        let copied = if let Some(buffer) = &mut self.buffer
+            && count < buffer.capacity
+        {
+            if self.position < buffer.start || self.position >= buffer.start + buffer.filled as u64
+            {
+                let fill = buffer
+                    .capacity
+                    .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                buffer.filled = 0;
+                if buffer.bytes.len() < fill {
+                    buffer
+                        .bytes
+                        .try_reserve_exact(fill - buffer.bytes.len())
+                        .map_err(io::Error::other)?;
+                    buffer.bytes.resize(fill, 0);
+                }
+                self.region
+                    .read_exact_at_io(self.position, &mut buffer.bytes[..fill])?;
+                buffer.start = self.position;
+                buffer.filled = fill;
+            }
+            let offset =
+                usize::try_from(self.position - buffer.start).expect("cache offset is bounded");
+            let copied = count.min(buffer.filled - offset);
+            output[..copied].copy_from_slice(&buffer.bytes[offset..offset + copied]);
+            copied
+        } else {
+            self.region
+                .read_exact_at_io(self.position, &mut output[..count])?;
+            count
+        };
+        self.position += u64::try_from(copied).expect("read count fits in u64");
+        Ok(copied)
     }
 }
 
@@ -503,6 +557,86 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
 
     use super::Region;
+
+    struct CountedSource {
+        reads: std::sync::Mutex<Vec<(u64, usize)>>,
+    }
+
+    impl super::Source for CountedSource {
+        fn len(&self) -> u64 {
+            128
+        }
+        fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+            self.reads.lock().unwrap().push((offset, output.len()));
+            for (index, byte) in output.iter_mut().enumerate() {
+                *byte = (offset + index as u64) as u8;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn metadata_read_ahead_reuses_reads_across_length_checks_and_stays_bounded() {
+        let source = std::sync::Arc::new(CountedSource {
+            reads: Default::default(),
+        });
+        let region = Region::new(source.clone(), 11, 43).unwrap();
+        let mut reader = crate::endian::EndianReader::new(
+            region.buffered_cursor(16),
+            crate::endian::Endian::Little,
+        );
+        for index in 0..20 {
+            assert_eq!(reader.remaining().unwrap(), 43 - index);
+            assert_eq!(reader.read_u8().unwrap(), (11 + index) as u8);
+        }
+        assert_eq!(
+            source.reads.lock().unwrap().len(),
+            2,
+            "small fields must share source reads even when readers check their remaining length"
+        );
+        reader.set_position(15).unwrap();
+        assert_eq!(
+            reader.read_u32().unwrap(),
+            u32::from_le_bytes([26, 27, 28, 29])
+        );
+        reader.set_position(42).unwrap();
+        assert_eq!(reader.read_u8().unwrap(), 53);
+        assert!(reader.read_u8().is_err());
+        assert!(reader.set_position(44).is_err());
+        assert!(
+            source
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|&(offset, count)| offset >= 11 && offset + count as u64 <= 54)
+        );
+    }
+
+    #[test]
+    fn buffered_cursors_match_direct_reads_across_seeks_windows_and_bulk_reads() {
+        let region = Region::from_bytes((0..128).collect::<Vec<u8>>())
+            .subregion(9, 71)
+            .unwrap();
+        for capacity in [1, 16, 64 * 1024] {
+            let mut cached = region.buffered_cursor(capacity);
+            let mut direct = region.cursor();
+            for offset in [0, 7, 16, 3, 69, 71, 25] {
+                for length in [1, 3, 17, 72] {
+                    cached.seek(SeekFrom::Start(offset)).unwrap();
+                    direct.seek(SeekFrom::Start(offset)).unwrap();
+                    let mut a = vec![0; length];
+                    let mut b = vec![0; length];
+                    assert_eq!(
+                        cached.read_exact(&mut a).is_ok(),
+                        direct.read_exact(&mut b).is_ok()
+                    );
+                    assert_eq!(a, b);
+                    assert_eq!(cached.position(), direct.position());
+                }
+            }
+        }
+    }
 
     #[test]
     fn subregions_and_cursors_are_strictly_bounded() {
