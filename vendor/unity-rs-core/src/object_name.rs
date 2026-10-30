@@ -182,7 +182,7 @@ impl ObjectNameReader {
             Endian::Big
         };
         Ok(Self {
-            reader: EndianReader::new(region.buffered_cursor(512), endian),
+            reader: EndianReader::new(region.read_ahead_cursor(512), endian),
             region,
             absolute_start: object.byte_start,
             target_platform: file.target_platform,

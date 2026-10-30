@@ -127,3 +127,14 @@ cursors (at most 64 KiB). Logical seeks and length checks preserve each cursor's
 window; large reads bypass it. Region bounds and read budgets still apply. Cursor
 regressions check partial reads, window boundaries, seeks, EOF, exact source ranges
 and fewer underlying reads. This avoids one Windows seek/read per scalar field.
+
+## Folder loading follow-up
+
+File-backed object-name scans explicitly opt into a shared read-ahead window.
+The window starts at 4 KiB, grows to at most 64 KiB for a forward scan and bypasses
+large reads. Ordinary payload/hierarchy reads retain their direct path. The Source
+trait has a default no-op read-ahead hook so other sources keep their established
+behavior. Shared-window, sparse/bulk-read, region/EOF and concurrent-cursor checks
+cover the cache. StudioObject exposes combined metadata access so catalog building
+does not repeat its name/container lookup. The application additionally shares its
+identity index with the GUI and skips unnecessary scans of short metadata strings.

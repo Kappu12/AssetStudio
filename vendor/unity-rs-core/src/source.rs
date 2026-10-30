@@ -2,9 +2,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
-#[cfg(not(unix))]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::{Error, Result};
 
@@ -13,6 +11,12 @@ pub trait Source: Send + Sync {
     fn len(&self) -> u64;
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()>;
+
+    /// Optional read-ahead for an immutable metadata scan. Random-access and
+    /// payload readers use `read_exact_at` and keep their normal I/O behavior.
+    fn read_exact_at_with_read_ahead(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
+        self.read_exact_at(offset, output)
+    }
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -51,7 +55,13 @@ impl Region {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path)?;
         let length = file.metadata()?.len();
-        Self::new(Arc::new(FileSource::new(file, length)), 0, length)
+        Self::new(
+            Arc::new(ReadAheadSource::new(Arc::new(FileSource::new(
+                file, length,
+            )))),
+            0,
+            length,
+        )
     }
 
     /// Concatenates bounded regions into one lazy random-access source.
@@ -133,6 +143,7 @@ impl Region {
             region: self.clone(),
             position: 0,
             buffer: None,
+            read_ahead: false,
         }
     }
 
@@ -149,6 +160,12 @@ impl Region {
                 .clamp(1, 64 * 1024)
                 .min(usize::try_from(self.len()).unwrap_or(usize::MAX)),
         });
+        cursor
+    }
+
+    pub(crate) fn read_ahead_cursor(&self, capacity: usize) -> RegionCursor {
+        let mut cursor = self.buffered_cursor(capacity);
+        cursor.read_ahead = true;
         cursor
     }
 
@@ -206,6 +223,15 @@ impl Region {
     }
 
     fn read_exact_at_io(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
+        self.read_exact_at_io_with_hint(offset, output, false)
+    }
+
+    fn read_exact_at_io_with_hint(
+        &self,
+        offset: u64,
+        output: &mut [u8],
+        read_ahead: bool,
+    ) -> io::Result<()> {
         let length = u64::try_from(output.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer length overflowed"))?;
         let end = offset
@@ -220,7 +246,12 @@ impl Region {
         let source_offset = self.source_offset.checked_add(offset).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "source offset overflowed")
         })?;
-        self.source.read_exact_at(source_offset, output)
+        if read_ahead {
+            self.source
+                .read_exact_at_with_read_ahead(source_offset, output)
+        } else {
+            self.source.read_exact_at(source_offset, output)
+        }
     }
 }
 
@@ -248,6 +279,7 @@ pub struct RegionCursor {
     region: Region,
     position: u64,
     buffer: Option<CursorBuffer>,
+    read_ahead: bool,
 }
 
 struct CursorBuffer {
@@ -293,8 +325,11 @@ impl Read for RegionCursor {
                         .map_err(io::Error::other)?;
                     buffer.bytes.resize(fill, 0);
                 }
-                self.region
-                    .read_exact_at_io(self.position, &mut buffer.bytes[..fill])?;
+                self.region.read_exact_at_io_with_hint(
+                    self.position,
+                    &mut buffer.bytes[..fill],
+                    self.read_ahead,
+                )?;
                 buffer.start = self.position;
                 buffer.filled = fill;
             }
@@ -304,8 +339,11 @@ impl Read for RegionCursor {
             output[..copied].copy_from_slice(&buffer.bytes[offset..offset + copied]);
             copied
         } else {
-            self.region
-                .read_exact_at_io(self.position, &mut output[..count])?;
+            self.region.read_exact_at_io_with_hint(
+                self.position,
+                &mut output[..count],
+                self.read_ahead,
+            )?;
             count
         };
         self.position += u64::try_from(copied).expect("read count fits in u64");
@@ -377,6 +415,98 @@ impl PositionalFile {
 struct FileSource {
     file: PositionalFile,
     length: u64,
+}
+
+/// Object-name readers are short-lived, but adjacent objects often occupy the
+/// same file pages. Share one bounded read-ahead window per physical source so
+/// those readers reuse file reads. Large payload reads bypass this window.
+struct ReadAheadSource {
+    source: Arc<dyn Source>,
+    window: Mutex<SourceWindow>,
+}
+
+#[derive(Default)]
+struct SourceWindow {
+    bytes: Vec<u8>,
+    start: u64,
+    filled: usize,
+}
+
+impl ReadAheadSource {
+    const CAPACITY: usize = 64 * 1024;
+    const SMALL_READ: usize = 4 * 1024;
+
+    fn new(source: Arc<dyn Source>) -> Self {
+        Self {
+            source,
+            window: Mutex::new(SourceWindow::default()),
+        }
+    }
+}
+
+impl Source for ReadAheadSource {
+    fn len(&self) -> u64 {
+        self.source.len()
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
+        self.source.read_exact_at(offset, output)
+    }
+
+    fn read_exact_at_with_read_ahead(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
+        if output.is_empty() || output.len() > Self::SMALL_READ {
+            return self.source.read_exact_at(offset, output);
+        }
+        let mut window = self
+            .window
+            .lock()
+            .map_err(|_| io::Error::other("file read-ahead lock was poisoned"))?;
+        let hit = offset
+            .checked_sub(window.start)
+            .and_then(|position| usize::try_from(position).ok())
+            .filter(|&position| {
+                position
+                    .checked_add(output.len())
+                    .is_some_and(|end| end <= window.filled)
+            });
+        if let Some(position) = hit {
+            output.copy_from_slice(&window.bytes[position..position + output.len()]);
+            return Ok(());
+        }
+        let remaining = self
+            .len()
+            .checked_sub(offset)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+        if remaining < output.len() as u64 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        // Grow read-ahead for a forward scan, but keep random/sparse prefix
+        // reads small (for example, names before large inline textures).
+        let adjacent = window.filled != 0
+            && offset >= window.start
+            && offset - window.start <= window.filled as u64 + Self::SMALL_READ as u64;
+        let capacity = if adjacent {
+            Self::CAPACITY
+        } else {
+            Self::SMALL_READ
+        };
+        let fill = usize::try_from(remaining.min(capacity as u64)).expect("file window fits usize");
+        window.filled = 0;
+        if window.bytes.len() < fill {
+            let additional = fill - window.bytes.len();
+            window
+                .bytes
+                .try_reserve_exact(additional)
+                .map_err(io::Error::other)?;
+            window.bytes.resize(fill, 0);
+        }
+        self.source
+            .read_exact_at(offset, &mut window.bytes[..fill])?;
+        window.start = offset;
+        window.filled = fill;
+        output.copy_from_slice(&window.bytes[..output.len()]);
+        Ok(())
+    }
 }
 
 impl FileSource {
@@ -560,11 +690,12 @@ mod tests {
 
     struct CountedSource {
         reads: std::sync::Mutex<Vec<(u64, usize)>>,
+        length: u64,
     }
 
     impl super::Source for CountedSource {
         fn len(&self) -> u64 {
-            128
+            self.length
         }
         fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
             self.reads.lock().unwrap().push((offset, output.len()));
@@ -579,6 +710,7 @@ mod tests {
     fn metadata_read_ahead_reuses_reads_across_length_checks_and_stays_bounded() {
         let source = std::sync::Arc::new(CountedSource {
             reads: Default::default(),
+            length: 128,
         });
         let region = Region::new(source.clone(), 11, 43).unwrap();
         let mut reader = crate::endian::EndianReader::new(
@@ -611,6 +743,110 @@ mod tests {
                 .iter()
                 .all(|&(offset, count)| offset >= 11 && offset + count as u64 <= 54)
         );
+    }
+
+    impl Region {
+        fn read_ahead_bytes(&self, length: usize) -> Vec<u8> {
+            let mut bytes = vec![0; length];
+            self.read_ahead_cursor(length.max(1))
+                .read_exact(&mut bytes)
+                .unwrap();
+            bytes
+        }
+    }
+
+    #[test]
+    fn file_read_ahead_is_shared_between_objects_bounded_and_bypassed_for_bulk_reads() {
+        let source = std::sync::Arc::new(CountedSource {
+            reads: Default::default(),
+            length: 200_000,
+        });
+        let cached = std::sync::Arc::new(super::ReadAheadSource::new(source.clone()));
+        let file = Region::new(cached.clone(), 0, source.length).unwrap();
+        for start in [1024, 1080, 1200] {
+            let object = file.subregion(start, 32).unwrap();
+            let bytes = object.read_ahead_bytes(32);
+            assert_eq!(
+                bytes,
+                (start..start + 32)
+                    .map(|value| value as u8)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            source.reads.lock().unwrap().len(),
+            1,
+            "nearby object readers must reuse the same physical file read"
+        );
+        assert_eq!(
+            source.reads.lock().unwrap()[0],
+            (1024, 4096),
+            "the first sparse prefix read should stay small"
+        );
+        file.subregion(5120, 32).unwrap().read_ahead_bytes(32);
+        assert_eq!(
+            source.reads.lock().unwrap().last(),
+            Some(&(5120, 64 * 1024)),
+            "a forward scan should grow read-ahead"
+        );
+        for start in [70_000, 0, 199_999] {
+            let bytes = file.subregion(start, 1).unwrap().read_ahead_bytes(1);
+            assert_eq!(bytes, vec![start as u8]);
+        }
+        let bulk = file.subregion(20_000, 5000).unwrap().read_ahead_bytes(5000);
+        assert_eq!(bulk[0], 20_000u32 as u8);
+        assert_eq!(
+            source.reads.lock().unwrap().last(),
+            Some(&(20_000, 5000)),
+            "bulk reads must not fill the small-read cache"
+        );
+        assert!(cached.window.lock().unwrap().bytes.len() <= 64 * 1024);
+        assert!(
+            source
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|&(start, len)| start + len as u64 <= source.length)
+        );
+        assert!(file.subregion(199_999, 2).is_err());
+        file.subregion(80_000, 32).unwrap().read_to_vec(32).unwrap();
+        assert_eq!(
+            source.reads.lock().unwrap().last(),
+            Some(&(80_000, 32)),
+            "ordinary payload readers must bypass scan read-ahead"
+        );
+    }
+
+    #[test]
+    fn independent_file_cursors_can_read_shared_windows_concurrently() {
+        let source = std::sync::Arc::new(CountedSource {
+            reads: Default::default(),
+            length: 200_000,
+        });
+        let file = Region::new(
+            std::sync::Arc::new(super::ReadAheadSource::new(source)),
+            0,
+            200_000,
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            for thread in 0..4 {
+                let file = file.clone();
+                scope.spawn(move || {
+                    for step in 0..300 {
+                        let start = ((step * 1777 + thread * 73) % 190_000) as u64;
+                        let bytes = file.subregion(start, 100).unwrap().read_ahead_bytes(100);
+                        assert_eq!(
+                            bytes,
+                            (start..start + 100)
+                                .map(|value| value as u8)
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                });
+            }
+        });
     }
 
     #[test]

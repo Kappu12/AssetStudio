@@ -1,3 +1,28 @@
+# Folder loading follow-up — 2026-10-30 Windows
+
+The user requested faster actual folder loading. A fresh full-corpus baseline
+was 23.995 seconds to load plus 3.655 seconds for browser indexes. File discovery,
+serialized metadata and reference indexing used less than one second; object names
+took 16.206 seconds, name resolution 2.231 and catalog construction 4.657.
+
+StudioObject::metadata combines name/container lookup. Short bounded_name inputs
+return before Unicode scanning. The browser shares Session's immutable Arc identity
+map rather than rebuilding it. Name readers explicitly request per-file read-ahead
+with a bounded adaptive 4–64 KiB window; ordinary hierarchy/payload reads bypass
+that cache. Read-ahead is scan-specific to avoid overfetching random model data.
+The final scan-specific cache loads in 10.974 seconds plus 2.899 for browser
+indexes (13.873 seconds until browsing, versus 27.651 before). Name scanning takes
+4.941 seconds; the complete hierarchy still reads in 17.220 seconds plus 0.458 for
+row ordering. See folder-load-final-scoped.log for the actual optimized run.
+Tests include independent concurrent readers, neighboring objects, sparse prefixes,
+bulk bypass, and file/region bounds. Full workspace: 1,019 tests passed, 16 ignored.
+
+Baseline/final profiles and the streaming full-listing SHA-256 comparisons live
+under ignored target/acceptance/folder-*. The complete JSON listing is 1,769,555,850
+bytes; compare folder-catalog-before.json and folder-catalog-after.json for exact
+record equivalence. Keep builds in Build with the existing native launcher aliases.
+No push is authorized. Earlier checkpoints follow.
+
 # Desktop type filters and performance — 2026-10-30 Windows
 
 The desktop has a #090909/white theme and persistent worker progress footer.

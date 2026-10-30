@@ -37,9 +37,17 @@ container, name and scene parsing.
 Local optimized Windows checks on this corpus restored 6,591,789 visible rows in
 about 7 ms, filtered 56,733 meshes in about 0.24 ms, and combined Mesh/Texture2D in
 about 1.7 ms; indexed results matched the reference filter exactly. Initial loading
-took about 22 seconds plus four seconds to prepare browser indexes. On the content
-bundle sample, reading 245,936 hierarchy nodes fell from 37.5 seconds to about
+takes about 11 seconds plus three seconds to prepare browser indexes after the
+folder-loading follow-up, compared with about 24 seconds plus four previously.
+On the content bundle sample, reading 245,936 hierarchy nodes fell from 37.5 seconds to about
 3.8–5.1 seconds. Timings depend on storage, file caching and available memory.
+
+Folder name scans reuse an adaptive file read-ahead window, growing from 4 KiB
+to at most 64 KiB for nearby reads. This is enabled explicitly for name scanning;
+hierarchy, payload and other random reads keep their normal access path. The
+browser shares the session's validated identity lookup, and catalog construction
+retrieves name/container metadata together and avoids scanning short strings
+solely to apply their length cap.
 
 Open the complete `A:\Blender\Rust_Assets` folder to resolve models' external
 texture CABs. Opening only `content.bundle_unpacked` provides geometry but leaves
