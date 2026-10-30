@@ -349,3 +349,8 @@ Build/
 /target/
 /dist/
 /corpus/private/
+
+# Release notes are source documentation, not generated release packages.
+!/docs/releases/
+/docs/releases/*
+!/docs/releases/*.md

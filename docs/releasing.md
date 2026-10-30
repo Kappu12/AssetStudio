@@ -14,10 +14,11 @@ tables and refuses application runtime DLLs, including VC++ redistributables
 and the former managed/native helpers. Windows 10/11 system DLLs and API sets
 remain allowed, including the OS graphics and audio interfaces.
 
-Development is currently on `rust-rewrite`. **Do not tag or release it yet.**
-The compatibility and validation records must be reviewed before a release is
-authorized; successful CI alone does not establish full parity with the former
-managed application or compatibility with every game.
+The reviewed Rust rewrite is merged into `main`. Releases require explicit
+authorization and a review of the compatibility and validation records;
+successful CI alone does not establish full parity with the former managed
+application or compatibility with every game. The first authorized Rust release
+is [v2.0.0-alpha.1](releases/v2.0.0-alpha.1.md), focused on Facepunch Rust.
 
 When a release is explicitly authorized:
 

@@ -95,7 +95,8 @@ The workflow is configured to build and test on GitHub-hosted Linux, Windows,
 and macOS runners. Hosted execution is tracked in the migration record. A matching
 `v<workspace-version>` tag triggers the Windows x64 ZIP release only after all
 validation jobs pass. Branch pushes and manual workflow runs do not release.
-No release or release tag is being created during this migration.
+The first Rust prerelease is [v2.0.0-alpha.1](docs/releases/v2.0.0-alpha.1.md),
+focused on the verified Facepunch Rust workflow.
 
 The workflow uses **no Actions artifact uploads and no Actions cache storage**.
 Each job builds on its own runner, and the release ZIP is uploaded directly to
