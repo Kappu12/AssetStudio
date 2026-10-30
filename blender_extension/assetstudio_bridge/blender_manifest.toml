@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "assetstudio_bridge"
-version = "0.1.0"
+version = "0.1.1"
 name = "AssetStudio Rust Bridge"
 tagline = "Import Rust models and materials directly from AssetStudio"
 maintainer = "AssetStudio contributors"

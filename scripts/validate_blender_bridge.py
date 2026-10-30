@@ -85,7 +85,8 @@ try:
     repeated = bridge.import_package(fbx)
     assert repeated["materials"] == len(materials)
     assert len([g for g in bpy.data.node_groups if g.get("assetstudio_shader_version") == 1]) == 1
-    before_failure = set(bpy.data.objects)
+    rollback_types = ("objects", "meshes", "armatures", "materials", "images", "actions", "collections", "node_groups", "libraries")
+    before_failure = {name: set(getattr(bpy.data, name)) for name in rollback_types}
     original_build = bridge.build_material
 
     def fail_build(*args):
@@ -99,7 +100,8 @@ try:
         assert "rollback probe" in str(error)
     finally:
         bridge.build_material = original_build
-    assert set(bpy.data.objects) == before_failure
+    for name in rollback_types:
+        assert set(getattr(bpy.data, name)) == before_failure[name], f"Rollback leaked {name}"
     try:
         bridge.package_path(result_path.parent, "../escape.fbx")
         raise AssertionError("Path traversal accepted")

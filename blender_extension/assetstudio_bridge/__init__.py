@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 import time
 import uuid
+from contextlib import suppress
 
 import bpy
 from bpy.app.handlers import persistent
 
 PROTOCOL = 1
 INSTANCE = uuid.uuid4().hex
+STARTED = time.time()
 _enabled = False
 _last_status = "Waiting for AssetStudio"
 
@@ -114,20 +116,22 @@ def import_package(fbx):
     for description in descriptions.values():
         for binding in description["channels"].values():
             package_path(fbx.parent, binding["file"])
-    previous = set(bpy.data.objects)
-    previous_materials = set(bpy.data.materials)
-    previous_images = set(bpy.data.images)
-    collection = bpy.data.collections.new("AssetStudio · " + fbx.stem)
-    bpy.context.scene.collection.children.link(collection)
+    data_types = ("objects", "meshes", "armatures", "materials", "images", "actions",
+                  "collections", "cameras", "lights", "node_groups", "libraries")
+    previous_data = {name: set(getattr(bpy.data, name)) for name in data_types}
     try:
+        collection = bpy.data.collections.new("AssetStudio · " + fbx.stem)
+        bpy.context.scene.collection.children.link(collection)
         bpy.ops.import_scene.fbx(filepath=str(fbx), use_image_search=False)
-        imported = set(bpy.data.objects) - previous
+        imported = set(bpy.data.objects) - previous_data["objects"]
         materials = {slot.material for obj in imported for slot in obj.material_slots if slot.material}
         mapped = 0
         for material in materials:
             name = material.name
             # Blender adds .001 etc when the same package is imported twice.
             description = descriptions.get(name) or descriptions.get(name.rsplit(".", 1)[0])
+            if name.startswith("ASMaterial_") and description is None:
+                raise ValueError(f"Missing material description for {name}")
             if description:
                 build_material(material, description, fbx.parent)
                 mapped += 1
@@ -140,22 +144,16 @@ def import_package(fbx):
         return {"objects": len(imported), "materials": mapped, "warnings": warnings,
                 "unresolved": {m["name"]: m.get("unresolved", []) for m in descriptions.values() if m.get("unresolved")}}
     except Exception:
-        # Only newly imported objects/data are eligible for cleanup.
-        for obj in set(bpy.data.objects) - previous:
-            bpy.data.objects.remove(obj, do_unlink=True)
-        for material in set(bpy.data.materials) - previous_materials:
-            if material.users == 0:
-                bpy.data.materials.remove(material)
-        for image in set(bpy.data.images) - previous_images:
-            if image.users == 0:
-                bpy.data.images.remove(image)
-        bpy.data.collections.remove(collection)
+        # Remove the whole newly created graph together, including mesh/rig data
+        # and animation actions that would otherwise leak after every failure.
+        added = set().union(*(set(getattr(bpy.data, name)) - previous_data[name] for name in data_types))
+        bpy.data.batch_remove(ids=added)
         raise
 
 
 def process_job(job):
     request = json.loads((job / "request.ready.json").read_text(encoding="utf-8"))
-    if request.get("version") != PROTOCOL or request.get("receiver") != INSTANCE:
+    if request.get("receiver") != INSTANCE:
         return
     # Claim first. A reload or failed receipt write must never duplicate an import.
     os.replace(job / "request.ready.json", job / "request.processing.json")
@@ -163,6 +161,11 @@ def process_job(job):
     selection = list(bpy.context.selected_objects)
     active = bpy.context.view_layer.objects.active
     try:
+        if request.get("version") != PROTOCOL:
+            raise ValueError("Unsupported AssetStudio bridge protocol")
+        models = request.get("models")
+        if not isinstance(models, list) or not models or not all(isinstance(model, str) for model in models):
+            raise ValueError("The request must contain a nonempty list of model paths")
         for index, relative in enumerate(request["models"]):
             atomic_json(job / "progress.json", {"completed": index, "total": len(request["models"])})
             try:
@@ -172,6 +175,8 @@ def process_job(job):
                 results.append(import_package(fbx))
             except Exception as error:
                 failures.append(f"{relative}: {error}")
+    except Exception as error:
+        failures.append(str(error))
     finally:
         for obj in bpy.context.selected_objects:
             obj.select_set(False)
@@ -206,7 +211,7 @@ def tick():
     root = bridge_root()
     try:
         atomic_json(root / "receivers" / (INSTANCE + ".json"), {"version": PROTOCOL, "receiver": INSTANCE,
-                    "time": time.time(), "blender": bpy.app.version_string, "scene": bpy.context.scene.name})
+                    "time": time.time(), "started": STARTED, "blender": bpy.app.version_string, "scene": bpy.context.scene.name})
         # Imports use Blender operators on the main thread, in Object Mode only.
         if bpy.context.mode == "OBJECT":
             for ready in sorted((root / "jobs").glob("*/request.ready.json")):
@@ -217,7 +222,13 @@ def tick():
                         break
                 except Exception as error:
                     _last_status = str(error)
-                    atomic_json(ready.parent / "result.json", {"version": PROTOCOL, "imported": [], "failed": [str(error)]})
+                    # A bad request gets one terminal failure, never a retry
+                    # every timer tick or an overwritten successful receipt.
+                    with suppress(FileNotFoundError):
+                        os.replace(ready, ready.with_name("request.processing.json"))
+                    result = ready.parent / "result.json"
+                    if not result.exists():
+                        atomic_json(result, {"version": PROTOCOL, "imported": [], "failed": [str(error)]})
     except Exception as error:
         _last_status = str(error)
     return 1.0
@@ -260,6 +271,7 @@ def unregister():
         bpy.app.timers.unregister(tick)
     if resume_bridge in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(resume_bridge)
-    (bridge_root() / "receivers" / (INSTANCE + ".json")).unlink(missing_ok=True)
+    with suppress(OSError):
+        (bridge_root() / "receivers" / (INSTANCE + ".json")).unlink(missing_ok=True)
     bpy.utils.unregister_class(ASSETSTUDIO_PT_bridge)
     bpy.utils.unregister_class(ASSETSTUDIO_OT_receive)

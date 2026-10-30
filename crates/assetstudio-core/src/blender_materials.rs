@@ -113,22 +113,29 @@ impl<'a> TextureCatalog<'a> {
             let mut warnings = Vec::new();
             for binding in textures.bindings_for(material.object) {
                 let texture = &textures.textures[binding.texture];
-                if let Some(record) = self.by_key.get(&texture.object)
-                    && let Some((base, _, _)) = texture_identity(&record.name)
-                    && !bases.contains(&base)
+                if let Some((slot, is_metallic)) = channel(&binding.property)
+                    && !channels.contains_key(slot)
                 {
-                    bases.push(base);
-                }
-                if let Some((slot, is_metallic)) = channel(&binding.property) {
+                    if let Some(record) = self.by_key.get(&texture.object)
+                        && let Some((base, _, _)) = texture_identity(&record.name)
+                    {
+                        if slot == "albedo" {
+                            bases.retain(|candidate| candidate != &base);
+                            bases.insert(0, base);
+                        } else if !bases.contains(&base) {
+                            bases.push(base);
+                        }
+                    }
                     if slot == "specular" {
                         metallic = Some(is_metallic);
                     }
-                    channels.entry(slot).or_insert_with(|| {
+                    channels.insert(
+                        slot.to_owned(),
                         json!({
                             "file": texture.file_name, "property": binding.property,
                             "scale": binding.scale, "offset": binding.offset, "source": "reference"
-                        })
-                    });
+                        }),
+                    );
                 }
             }
             for slot in CHANNELS {

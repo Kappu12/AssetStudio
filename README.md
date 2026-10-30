@@ -1,4 +1,4 @@
-# AssetStudio — Rust development branch
+# AssetStudio
 
 Native desktop browser and command-line tools for Unity assets. The Rust app
 uses the pinned, MIT-licensed `unity-rs-core` format backend and runs without
@@ -37,6 +37,23 @@ The desktop binary is `AssetStudio` (`AssetStudio.exe` on Windows); the CLI is
 helpers. GUI work includes multi-file/folder loading and drag/drop, asset
 filtering and sorting, image/text/audio/mesh previews, scene hierarchy, selected
 exports, and JSON/XML asset maps. File decoding and export run on workers.
+
+## Facepunch Rust → Blender
+
+The standalone extension source, copied Rust shader node and license are tracked
+in [`blender_extension/assetstudio_bridge`](blender_extension/assetstudio_bridge).
+It does not require Rust Toolset or Ruster. Release ZIPs include the installable
+`assetstudio_bridge.zip`; to package it from this checkout:
+
+```sh
+python scripts/package_blender_extension.py --output Build/assetstudio_bridge.zip
+```
+
+Install that ZIP in Blender 5.3 or newer via Preferences → Get Extensions →
+Install from Disk. Open the game assets in AssetStudio, tick model roots in Scene
+hierarchy and click **Export to Blender** in the top toolbar. Models arrive with
+the bundled Rust shader, mapped textures and catalog searches for missing maps.
+See the [bridge guide](docs/blender-bridge.md) for selection, progress and limits.
 
 ## Command line
 

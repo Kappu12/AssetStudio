@@ -313,6 +313,9 @@ fn material_object() -> Vec<u8> {
     material_named("Material", [1.0, 1.0, 1.0, 1.0])
 }
 fn material_named(name: &str, color: [f32; 4]) -> Vec<u8> {
+    material_with_textures(name, color, &[("_MainTex", 71)])
+}
+fn material_with_textures(name: &str, color: [f32; 4], textures: &[(&str, i64)]) -> Vec<u8> {
     let mut out = Vec::new();
     push_aligned_string(&mut out, name);
     push_pptr(&mut out, 0);
@@ -324,10 +327,12 @@ fn material_named(name: &str, color: [f32; 4]) -> Vec<u8> {
     push_i32(&mut out, -1);
     push_i32(&mut out, 0);
     push_i32(&mut out, 0);
-    push_i32(&mut out, 1);
-    push_aligned_string(&mut out, "_MainTex");
-    push_pptr(&mut out, 71);
-    push_floats(&mut out, &[1.0, 1.0, 0.0, 0.0]);
+    push_i32(&mut out, i32::try_from(textures.len()).unwrap());
+    for &(property, texture) in textures {
+        push_aligned_string(&mut out, property);
+        push_pptr(&mut out, texture);
+        push_floats(&mut out, &[1.0, 1.0, 0.0, 0.0]);
+    }
     push_i32(&mut out, 0);
     push_i32(&mut out, 0);
     push_i32(&mut out, 1);
@@ -420,13 +425,79 @@ fn model_session() -> Session {
 }
 
 #[test]
+fn blender_workflow_matches_the_texture_chosen_for_the_shared_specular_channel() {
+    for (first, second, workflow) in [
+        ("_SpecGlossMap", "_MetallicGlossMap", "specular"),
+        ("_MetallicGlossMap", "_SpecGlossMap", "metallic"),
+    ] {
+        let session = Session::from_regions(
+            [(
+                "CAB-workflow".into(),
+                Region::from_bytes(objects_file(&[
+                    (1, 1, model_game_object(&[11, 21, 31])),
+                    (4, 11, model_transform()),
+                    (33, 21, model_mesh_filter()),
+                    (23, 31, model_renderer()),
+                    (43, 51, model_mesh()),
+                    (
+                        21,
+                        61,
+                        material_with_textures(
+                            "both_workflows",
+                            [1.0; 4],
+                            &[(first, 71), (second, 72)],
+                        ),
+                    ),
+                    (28, 71, texture_object("first", &[255, 0, 0, 255])),
+                    (28, 72, texture_object("second", &[0, 255, 0, 255])),
+                ])),
+            )],
+            &LoadOptions::default(),
+        )
+        .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let report = session
+            .export_blender_models(
+                output.path(),
+                &[AssetKey {
+                    file_index: 0,
+                    path_id: 1,
+                }],
+                &Default::default(),
+                None,
+            )
+            .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let manifest = report
+            .written
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == "assetstudio-materials.json")
+            })
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(
+            value["materials"][0]["channels"]["specular"]["property"],
+            first
+        );
+        assert_eq!(value["materials"][0]["workflow"], workflow);
+    }
+}
+
+#[test]
 fn blender_recovers_maps_from_other_loaded_files_and_rejects_ambiguous_matches() {
     for ambiguous in [false, true] {
-        let mut missing = vec![(
-            28,
-            72,
-            texture_object("rocket_normal", &[128, 128, 255, 255]),
-        )];
+        let mut missing = vec![
+            (
+                28,
+                72,
+                texture_object("rocket_normal", &[128, 128, 255, 255]),
+            ),
+            // The known albedo stem must beat a generic material-name guess.
+            (28, 74, texture_object("generic_normal", &[255, 0, 0, 255])),
+        ];
         if ambiguous {
             missing.push((28, 73, texture_object("rocket_normal", &[255, 0, 0, 255])));
         }
@@ -440,7 +511,7 @@ fn blender_recovers_maps_from_other_loaded_files_and_rejects_ambiguous_matches()
                         (33, 21, model_mesh_filter()),
                         (23, 31, model_renderer()),
                         (43, 51, model_mesh()),
-                        (21, 61, material_named("rocket", [1.0; 4])),
+                        (21, 61, material_named("generic", [1.0; 4])),
                         (28, 71, texture_object("rocket_albedo", &[255, 0, 0, 255])),
                     ])),
                 ),
@@ -476,7 +547,7 @@ fn blender_recovers_maps_from_other_loaded_files_and_rejects_ambiguous_matches()
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
         let material = &value["materials"][0];
-        assert_eq!(material["name"], "rocket");
+        assert_eq!(material["name"], "generic");
         assert_eq!(material["fbx_name"], "ASMaterial_0_61");
         assert_eq!(material["channels"]["albedo"]["source"], "reference");
         if ambiguous {
@@ -489,6 +560,10 @@ fn blender_recovers_maps_from_other_loaded_files_and_rejects_ambiguous_matches()
             );
         } else {
             assert_eq!(material["channels"]["normal"]["source"], "catalog");
+            assert_eq!(
+                material["channels"]["normal"]["asset_name"],
+                "rocket_normal"
+            );
             let texture = manifest
                 .parent()
                 .unwrap()

@@ -8,7 +8,76 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use assetstudio_core::{AssetKey, ModelExportOptions, OperationReport, Session};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+#[derive(Deserialize)]
+struct Receiver {
+    version: u32,
+    receiver: String,
+    time: f64,
+    started: Option<f64>,
+}
+
+fn read_receiver(path: &std::path::Path, now: f64) -> Option<Receiver> {
+    let value: Receiver = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    (value.version == 1
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        && (0.0..=8.0).contains(&(now - value.time))
+        && value.receiver.len() == 32
+        && value.receiver.bytes().all(|b| b.is_ascii_hexdigit())
+        && path
+            .file_stem()
+            .is_some_and(|stem| stem == value.receiver.as_str()))
+    .then_some(value)
+}
+
+fn ensure_receiver(root: &std::path::Path, id: &str) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+    if read_receiver(&root.join("receivers").join(format!("{id}.json")), now).is_none() {
+        bail!(
+            "The selected Blender window stopped responding during export. Reopen Blender and retry."
+        );
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct ImportedModel {
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Receipt {
+    version: u32,
+    imported: Vec<ImportedModel>,
+    failed: Vec<String>,
+}
+
+fn apply_receipt(bytes: &[u8], expected: usize, report: &mut OperationReport) -> Result<usize> {
+    let receipt: Receipt = serde_json::from_slice(bytes).context("Read Blender import receipt")?;
+    if receipt.version != 1 {
+        bail!("Unsupported Blender bridge receipt");
+    }
+    if receipt.failed.is_empty() && receipt.imported.len() != expected {
+        bail!(
+            "Blender acknowledged {} of {expected} models without reporting the missing imports",
+            receipt.imported.len()
+        );
+    }
+    let imported = receipt.imported.len();
+    report.failed.extend(receipt.failed);
+    report.skipped.extend(
+        receipt
+            .imported
+            .into_iter()
+            .flat_map(|model| model.warnings),
+    );
+    Ok(imported)
+}
 
 fn root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ASSETSTUDIO_BLENDER_BRIDGE") {
@@ -27,24 +96,14 @@ fn receiver(root: &std::path::Path) -> Result<String> {
     let mut receivers = Vec::new();
     if let Ok(entries) = fs::read_dir(root.join("receivers")) {
         for entry in entries.flatten() {
-            let Ok(bytes) = fs::read(entry.path()) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-                continue;
-            };
-            let Some(time) = value["time"].as_f64() else {
-                continue;
-            };
-            let Some(id) = value["receiver"].as_str() else {
-                continue;
-            };
-            if value["version"] == 1
-                && (0.0..=8.0).contains(&(now - time))
-                && id.len() == 32
-                && id.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                receivers.push((time, id.to_owned()));
+            if let Some(value) = read_receiver(&entry.path(), now) {
+                receivers.push((
+                    value
+                        .started
+                        .filter(|started| started.is_finite())
+                        .unwrap_or(value.time),
+                    value.receiver,
+                ));
             }
         }
     }
@@ -83,12 +142,8 @@ pub fn send(
         bail!("No model was exported: {}", report.failed.join("; "));
     }
     // A receiver must still be running when the potentially lengthy export ends.
-    if receiver(&root)? != receiver_id {
-        bail!(
-            "The active Blender receiver changed during export. The model package is saved at {}. Retry with the intended Blender window open.",
-            job.display()
-        );
-    }
+    ensure_receiver(&root, &receiver_id)
+        .with_context(|| format!("The model package is saved at {}", job.display()))?;
     let temporary = job.join("request.tmp");
     fs::write(
         &temporary,
@@ -99,27 +154,8 @@ pub fn send(
     let started = Instant::now();
     loop {
         if let Ok(bytes) = fs::read(job.join("result.json")) {
-            let result: Value =
-                serde_json::from_slice(&bytes).context("Read Blender import receipt")?;
-            if result["version"] != 1 {
-                bail!("Unsupported Blender bridge receipt");
-            }
-            if let Some(failures) = result["failed"].as_array() {
-                report
-                    .failed
-                    .extend(failures.iter().filter_map(Value::as_str).map(str::to_owned));
-            }
-            let imported = result["imported"]
-                .as_array()
-                .context("Missing Blender import result")?;
-            for model in imported {
-                if let Some(warnings) = model["warnings"].as_array() {
-                    report
-                        .skipped
-                        .extend(warnings.iter().filter_map(Value::as_str).map(str::to_owned));
-                }
-            }
-            progress.update("Imported into Blender", imported.len(), Some(models.len()));
+            let imported = apply_receipt(&bytes, models.len(), &mut report)?;
+            progress.update("Imported into Blender", imported, Some(models.len()));
             return Ok(report);
         }
         if let Ok(bytes) = fs::read(job.join("progress.json"))
@@ -158,7 +194,9 @@ mod tests {
     fn receiver_requires_a_recent_compatible_heartbeat() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("receivers")).unwrap();
-        let path = root.path().join("receivers/test.json");
+        let path = root
+            .path()
+            .join("receivers/01234567890123456789012345678901.json");
         fs::write(
             &path,
             r#"{"version":1,"receiver":"01234567890123456789012345678901","time":0}"#,
@@ -181,5 +219,69 @@ mod tests {
             receiver(root.path()).unwrap(),
             "01234567890123456789012345678901"
         );
+        fs::rename(&path, path.with_extension("tmp")).unwrap();
+        assert!(
+            receiver(root.path()).is_err(),
+            "unpublished heartbeats must be ignored"
+        );
+    }
+
+    #[test]
+    fn receiver_stays_pinned_when_another_window_starts_or_heartbeats() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("receivers")).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let first = "01234567890123456789012345678901";
+        let second = "11234567890123456789012345678901";
+        for (id, started, heartbeat) in [(first, now - 10.0, now), (second, now - 5.0, now - 1.0)] {
+            fs::write(
+                root.path().join("receivers").join(format!("{id}.json")),
+                serde_json::to_vec(
+                    &json!({"version":1,"receiver":id,"started":started,"time":heartbeat}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(receiver(root.path()).unwrap(), second);
+        assert!(ensure_receiver(root.path(), first).is_ok());
+        assert!(ensure_receiver(root.path(), second).is_ok());
+        fs::remove_file(root.path().join("receivers").join(format!("{first}.json"))).unwrap();
+        assert!(ensure_receiver(root.path(), first).is_err());
+    }
+
+    #[test]
+    fn incomplete_or_malformed_receipts_cannot_report_success() {
+        for bytes in [
+            r#"{"version":1,"imported":[],"failed":[]}"#,
+            r#"{"version":1,"imported":[{}]}"#,
+            r#"{"version":1,"imported":[{}],"failed":[1]}"#,
+        ] {
+            assert!(apply_receipt(bytes.as_bytes(), 1, &mut OperationReport::default()).is_err());
+        }
+        let mut report = OperationReport::default();
+        assert_eq!(
+            apply_receipt(
+                br#"{"version":1,"imported":[{"warnings":["ambiguous map"]}],"failed":[]}"#,
+                1,
+                &mut report
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(report.skipped, ["ambiguous map"]);
+        assert_eq!(
+            apply_receipt(
+                br#"{"version":1,"imported":[],"failed":["invalid model"]}"#,
+                1,
+                &mut report
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(report.failed, ["invalid model"]);
     }
 }

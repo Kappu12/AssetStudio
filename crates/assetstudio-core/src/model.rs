@@ -275,7 +275,12 @@ impl Session {
             Some(
                 texture_catalog
                     .context("missing Blender texture catalog")?
-                    .manifest(self, &mut model, &mut textures, remaining)?,
+                    .manifest(
+                        self,
+                        &mut model,
+                        &mut textures,
+                        remaining.min(MAX_EXPORT_FILE_BYTES),
+                    )?,
             )
         } else {
             None

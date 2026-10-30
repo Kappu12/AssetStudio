@@ -33,8 +33,9 @@ unresolved channels and import receipts are also retained with each package unde
 `%LOCALAPPDATA%/AssetStudio/BlenderBridge/jobs`. Keep these packages while the
 imported .blend uses their textures, or pack Blender's external resources before
 moving it. Exports are retained deliberately; source game files are read only.
-When several Blender instances are open, the most recently active receiver is
-used. Close the other instances to target a particular file reliably.
+When several Blender instances are open, a new export selects the most recently
+started receiver and keeps that receiver for the entire export. Close the other
+instances to target a particular file reliably.
 
 The queue uses local files only; there is no listening network port or required
 Python package. Requests are claimed before import to prevent duplicate imports
