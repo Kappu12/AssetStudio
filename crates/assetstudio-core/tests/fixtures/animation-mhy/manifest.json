@@ -1,0 +1,158 @@
+{
+  "mhy_variable": {
+    "source_acl": "mhy_variable.acl",
+    "source_acl_sha256": "c02bafa47984764f9da226610262eb4710abe4d5eb72bbadd41929a297c17dd2",
+    "source_csv": "mhy_variable.cpp.csv",
+    "source_cpp": "ACL v1.1.0 unmodified compressor/decoder; baseline x64 acl.dll independently agrees",
+    "format": 22,
+    "platform": -2,
+    "class_id": 74,
+    "path_id": 91,
+    "curve_count": 10,
+    "binding_order": [
+      {
+        "path": 0,
+        "attribute": 2,
+        "components": 4
+      },
+      {
+        "path": 0,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 0,
+        "attribute": 3,
+        "components": 3
+      }
+    ],
+    "dense": [],
+    "constants": [],
+    "bytes": 1028,
+    "sha256": "de52b1c3f516719ad278f67a970bf605052b8aee6c1a3a70bd1a04cbded8f079",
+    "notes": "Synthetic complete Unity serialized player bytes in baseline C# order. Non-SR MHY ACL follows ConstantClip and precedes muscle tail; no live game data.",
+    "dll_csv": "mhy_variable.dll.csv",
+    "dll_sha256": "2982fbcf80062c2ad20ea7bcc5b15b601de68e4eb9f71e11689c3d7694cfe9c9"
+  },
+  "mhy_mixed_tracks": {
+    "source_acl": "mhy_mixed_tracks.acl",
+    "source_acl_sha256": "c02bafa47984764f9da226610262eb4710abe4d5eb72bbadd41929a297c17dd2",
+    "source_csv": "mhy_mixed_tracks.cpp.csv",
+    "source_cpp": "ACL v1.1.0 unmodified compressor/decoder; baseline x64 acl.dll independently agrees",
+    "format": 22,
+    "platform": -2,
+    "class_id": 74,
+    "path_id": 91,
+    "curve_count": 10,
+    "binding_order": [
+      {
+        "path": 0,
+        "attribute": 2,
+        "components": 4
+      },
+      {
+        "path": 0,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 0,
+        "attribute": 3,
+        "components": 3
+      },
+      {
+        "path": 3815930669,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 3815930669,
+        "attribute": 3,
+        "components": 3
+      }
+    ],
+    "dense": [
+      10,
+      20,
+      30,
+      40,
+      50,
+      60
+    ],
+    "constants": [
+      2,
+      3,
+      4
+    ],
+    "bytes": 1576,
+    "sha256": "27defcc1e73475fba6a506ab4bae9444f2ad3c0c2063d2c4eeb470eda1ecd86d",
+    "notes": "Synthetic complete Unity serialized player bytes in baseline C# order. Non-SR MHY ACL follows ConstantClip and precedes muscle tail; no live game data.",
+    "dll_csv": "mhy_mixed_tracks.dll.csv",
+    "dll_sha256": "2982fbcf80062c2ad20ea7bcc5b15b601de68e4eb9f71e11689c3d7694cfe9c9"
+  },
+  "mhy_multibone": {
+    "source_acl": "mhy_multibone.acl",
+    "source_acl_sha256": "27eb89e866d547d34f3a6fb751726bd078e6a7373ec910f20787f7632a2feb13",
+    "source_csv": "mhy_multibone.cpp.csv",
+    "source_cpp": "ACL v1.1.0 unmodified compressor/decoder; baseline x64 acl.dll independently agrees",
+    "format": 22,
+    "platform": -2,
+    "class_id": 74,
+    "path_id": 91,
+    "curve_count": 30,
+    "binding_order": [
+      {
+        "path": 0,
+        "attribute": 2,
+        "components": 4
+      },
+      {
+        "path": 0,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 0,
+        "attribute": 3,
+        "components": 3
+      },
+      {
+        "path": 3815930669,
+        "attribute": 2,
+        "components": 4
+      },
+      {
+        "path": 3815930669,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 3815930669,
+        "attribute": 3,
+        "components": 3
+      },
+      {
+        "path": 1695805236,
+        "attribute": 2,
+        "components": 4
+      },
+      {
+        "path": 1695805236,
+        "attribute": 1,
+        "components": 3
+      },
+      {
+        "path": 1695805236,
+        "attribute": 3,
+        "components": 3
+      }
+    ],
+    "dense": [],
+    "constants": [],
+    "bytes": 1860,
+    "sha256": "8157d1abb97ebd20223cbb838c3bf9893b8038609190348a57e7589384aac14f",
+    "notes": "Synthetic complete Unity serialized player bytes in baseline C# order. Non-SR MHY ACL follows ConstantClip and precedes muscle tail; no live game data.",
+    "dll_csv": "mhy_multibone.dll.csv",
+    "dll_sha256": "2982fbcf80062c2ad20ea7bcc5b15b601de68e4eb9f71e11689c3d7694cfe9c9"
+  }
+}
