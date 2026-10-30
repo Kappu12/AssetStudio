@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::{Context, Result, bail};
@@ -39,6 +39,7 @@ pub struct Session {
     protected_sources: crate::source_protection::SourceProtection,
     maximum_assets: usize,
     maximum_catalog_text_bytes: usize,
+    pub(crate) mesh_scene_owners: OnceLock<HashMap<AssetKey, Vec<AssetKey>>>,
 }
 
 impl Session {
@@ -339,6 +340,7 @@ impl Session {
             protected_sources: crate::source_protection::SourceProtection::default(),
             maximum_assets: options.maximum_assets,
             maximum_catalog_text_bytes,
+            mesh_scene_owners: OnceLock::new(),
         };
         for file in session.studio.collection().serialized_files() {
             session.protected_sources.include_label(&file.path)?;

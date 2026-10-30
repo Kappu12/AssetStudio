@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod hierarchy;
 mod preferences;
 mod preview_geometry;
 mod preview_image;

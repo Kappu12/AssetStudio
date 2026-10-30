@@ -313,6 +313,22 @@ pub struct TosEntry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct StateMachineBehaviourRange {
+    pub state_id: u32,
+    pub layer_index: i32,
+    pub start_index: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateMachineBehaviourData {
+    pub ranges: Vec<StateMachineBehaviourRange>,
+    pub indices: U32Array,
+    pub behaviours: Vec<ObjectReference>,
+    pub multi_threaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnimatorController {
     pub path_id: i64,
     pub name: String,
@@ -320,6 +336,7 @@ pub struct AnimatorController {
     pub controller: ControllerConstant,
     pub tos: Vec<TosEntry>,
     pub animation_clips: Vec<ObjectReference>,
+    pub state_machine_behaviours: StateMachineBehaviourData,
 }
 
 pub fn read_animator_controller(
@@ -335,10 +352,10 @@ pub fn read_animator_controller(
         let controller = reader.read_controller_constant()?;
         let tos = reader.read_tos()?;
         let animation_clips = reader.read_animation_clips()?;
-        reader.read_state_machine_behaviour_tail()?;
+        let state_machine_behaviours = reader.read_state_machine_behaviour_tail()?;
 
         // Now this means something: everything the object carries has been
-        // accounted for, either read or checked and found empty.
+        // accounted for, including populated behaviour metadata.
         let trailing = reader.reader.remaining()?;
         if trailing != 0 {
             return Err(Error::invalid_data(format!(
@@ -352,6 +369,7 @@ pub fn read_animator_controller(
             controller,
             tos,
             animation_clips,
+            state_machine_behaviours,
         })
     })();
     finish_lenient(outcome, "AnimatorController", &file.unity_version, result)
@@ -794,37 +812,54 @@ impl ControllerReader {
         Ok(clips)
     }
 
-    /// Reads the state-machine-behaviour tail that follows the animation clips.
-    ///
-    /// The managed reader stops at the animation clips and never looks at what
-    /// follows, so this reader did too -- and then refused every real file,
-    /// because all 212 `AnimatorController` objects in a Unity 2022.3 game
-    /// carry exactly sixteen more bytes: two empty collections in
-    /// `m_StateMachineBehaviourVectorDescription`, an empty
-    /// `m_StateMachineBehaviours`, and `m_MultiThreadedStateMachine` with its
-    /// padding.
-    ///
-    /// Reading the counts rather than skipping sixteen bytes is what keeps the
-    /// trailing-byte check meaningful. Non-empty collections are reported as
-    /// unsupported and named, because no file available here has one: the
-    /// element layouts would be a guess, and a guess that parses is worse than
-    /// a refusal that explains itself.
-    fn read_state_machine_behaviour_tail(&mut self) -> Result<()> {
-        for field in [
-            "AnimatorController state machine behaviour ranges",
-            "AnimatorController state machine behaviour indices",
-            "AnimatorController state machine behaviours",
-        ] {
-            let count = self.reader.read_u32()?;
-            if count != 0 {
-                return Err(Error::unsupported(format!(
-                    "{field} has {count} entries, a shape this reader does not model"
-                )));
+    /// StateKey/StateRange pairs are four 32-bit fields, followed by uint
+    /// indices, MonoBehaviour PPtrs and the threading flag. Layout provenance:
+    /// https://gist.github.com/capntrips/659bec02ab8f65347f40bd88aa0ef059/443ebfafeeb7d03321ba4b4d0afa830ee1a92962
+    /// The populated layout is additionally exercised by the Facepunch corpus.
+    fn read_state_machine_behaviour_tail(&mut self) -> Result<StateMachineBehaviourData> {
+        let count = self.read_count("AnimatorController behaviour ranges", 16)?;
+        let mut ranges = self
+            .reserve::<StateMachineBehaviourRange>(count, "AnimatorController behaviour ranges")?;
+        for _ in 0..count {
+            ranges.push(StateMachineBehaviourRange {
+                state_id: self.reader.read_u32()?,
+                layer_index: self.reader.read_i32()?,
+                start_index: self.reader.read_u32()?,
+                count: self.reader.read_u32()?,
+            });
+        }
+        let indices = self.read_u32_array("AnimatorController behaviour indices")?;
+        let count = self.read_count("AnimatorController behaviours", self.pptr_size())?;
+        self.check_reference_budget(count, "AnimatorController behaviours")?;
+        let mut behaviours =
+            self.reserve::<ObjectReference>(count, "AnimatorController behaviours")?;
+        for _ in 0..count {
+            behaviours.push(self.read_pptr("AnimatorController behaviour")?);
+        }
+        for range in &ranges {
+            let end = u64::from(range.start_index) + u64::from(range.count);
+            if end > indices.count as u64 {
+                return Err(Error::invalid_data(
+                    "AnimatorController behaviour range exceeds its index array",
+                ));
             }
         }
-        self.reader.read_u8()?;
+        let mut values = EndianReader::new(indices.region.buffered_cursor(4096), indices.endian);
+        for _ in 0..indices.count {
+            if u64::from(values.read_u32()?) >= behaviours.len() as u64 {
+                return Err(Error::invalid_data(
+                    "AnimatorController behaviour index exceeds its behaviour array",
+                ));
+            }
+        }
+        let multi_threaded = self.reader.read_bool()?;
         self.align(4)?;
-        Ok(())
+        Ok(StateMachineBehaviourData {
+            ranges,
+            indices,
+            behaviours,
+            multi_threaded,
+        })
     }
 
     fn read_aligned_string(&mut self, field: &str) -> Result<String> {
@@ -1102,12 +1137,82 @@ fn validate_supported_version(file: &SerializedFile) -> Result<VersionGateOutcom
 #[cfg(test)]
 mod tests {
     use crate::game_variant::GameVariant;
-    use crate::serialized::SerializedFile;
+    use crate::serialized::{ObjectReference, SerializedFile};
     use crate::source::Region;
 
     use super::{
         ANIMATOR_CONTROLLER_CLASS_ID, AnimatorControllerReadLimits, read_animator_controller,
     };
+
+    #[test]
+    fn populated_behaviour_tail_preserves_clips_and_checks_ranges_references_and_budgets() {
+        for endian in [TestEndian::Little, TestEndian::Big] {
+            let mut object = minimal_controller_object(endian, false, "behaviours", 91, None);
+            object.truncate(object.len() - 16);
+            let start = object.len();
+            endian.push_i32(&mut object, 1);
+            endian.push_u32(&mut object, 0x1234);
+            endian.push_i32(&mut object, 2);
+            endian.push_u32(&mut object, 0);
+            endian.push_u32(&mut object, 2);
+            push_u32_array(&mut object, endian, &[1, 0]);
+            endian.push_i32(&mut object, 2);
+            push_pptr(&mut object, endian, 0, 55);
+            push_pptr(&mut object, endian, 1, 66);
+            object.push(1);
+            align(&mut object, 4);
+            let file = parse_asset(22, endian, 13, "2022.3.62f1", &object);
+            let parsed =
+                read_animator_controller(&file, 0, AnimatorControllerReadLimits::default())
+                    .unwrap();
+            assert_eq!(parsed.animation_clips[0].path_id, 91);
+            let data = parsed.state_machine_behaviours;
+            assert_eq!(data.ranges[0].state_id, 0x1234);
+            assert_eq!(data.ranges[0].layer_index, 2);
+            assert_eq!(data.indices.read_values(2).unwrap(), vec![1, 0]);
+            assert_eq!(
+                data.behaviours[1],
+                ObjectReference {
+                    file_id: 1,
+                    path_id: 66
+                }
+            );
+            assert!(data.multi_threaded);
+            for end in start..object.len() {
+                let file = parse_asset(22, endian, 13, "2022.3.62f1", &object[..end]);
+                assert!(
+                    read_animator_controller(&file, 0, AnimatorControllerReadLimits::default())
+                        .is_err()
+                );
+            }
+            let limits = AnimatorControllerReadLimits {
+                maximum_reference_bytes: 24,
+                ..Default::default()
+            };
+            assert!(read_animator_controller(&file, 0, limits).is_err());
+            let mut bad = object.clone();
+            // Range count two becomes three, exceeding the two-element index array.
+            let mut count = Vec::new();
+            endian.push_u32(&mut count, 3);
+            bad[start + 16..start + 20].copy_from_slice(&count);
+            let bad = parse_asset(22, endian, 13, "2022.3.62f1", &bad);
+            assert!(
+                read_animator_controller(&bad, 0, Default::default())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("range exceeds")
+            );
+            let mut bad = object.clone();
+            bad[start + 24..start + 28].copy_from_slice(&count);
+            let bad = parse_asset(22, endian, 13, "2022.3.62f1", &bad);
+            assert!(
+                read_animator_controller(&bad, 0, Default::default())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("index exceeds")
+            );
+        }
+    }
 
     #[test]
     fn reads_deep_unity_2017_controller() {

@@ -1,3 +1,36 @@
+# Model navigation and checkbox exports — 2026-10-30 Windows
+
+The user's screenshot showed clicks intercepted by selectable table-cell text.
+Row child UIs now disable text selection; pointer regressions click all four
+columns at their text centers and verify row selection with no text cursor.
+
+Right-click Mesh/GameObject/Animator -> Show in scene hierarchy resolves actual
+GameObject owners. Mesh ownership is indexed lazily, bounded and cached, with
+orphan/superseded filters excluded. Multiple owners have a Next owner control.
+Model root jumps to the enclosing top-level GameObject. SceneTree keeps virtual
+DFS rows, parent/subtree intervals, check state and collapsed branches. Checking
+a parent includes its descendants; highest checked roots become separate model
+packages. Reveal opens ancestors and scrolls to the target. Checkboxes and row
+preview selection remain independent. Disclosure icons are painted vectors.
+
+The actual DragonLauncher_body mesh found two owners in the supplied collection.
+Its viewmodel exposed populated AnimatorController behaviour-tail metadata;
+the reader now retains state/layer ranges, uint indices, MonoBehaviour PPtrs and
+threading state with existing count/reference/allocation bounds. Both-endian
+truncation and malformed-range/index regressions pass. Default animation export
+remains enabled. Package names use a bounded prefab leaf plus object identity,
+avoiding importer path limits caused by repeating full asset paths.
+
+Real workflow: full folder -> mesh owner -> Model root -> checked subtree ->
+binary FBX package. Blender 5.3 independently imported 10 meshes, 48,072 vertices,
+75,471 polygons, eight materials, 25 file images, one armature and 20 actions;
+no missing images. Artifacts remain ignored under target/acceptance/dragon-*. The
+latest successful package is identified by its run's navigation-evidence.json;
+latest-blender-import.json points to the independently imported FBX. Native UI
+events are covered by headless pointer tests; no OS/GPU interaction is claimed.
+Full workspace: 1,029 tests pass, 17 optional tests ignored; real workflow probe
+also passes explicitly. Strict Clippy and formatting pass. Prior checkpoints follow.
+
 # Folder loading follow-up — 2026-10-30 Windows
 
 The user requested faster actual folder loading. A fresh full-corpus baseline

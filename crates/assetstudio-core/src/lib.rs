@@ -17,6 +17,7 @@ mod model_options;
 mod model_preview;
 mod output;
 pub mod recovery;
+mod scene_navigation;
 pub mod schema;
 mod session;
 mod source_protection;

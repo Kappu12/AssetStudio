@@ -12,6 +12,7 @@ use assetstudio_core::{
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, TextEdit, Vec2};
 
 use crate::audio::AudioPlayer;
+use crate::hierarchy::SceneTree;
 use crate::preview_image::{self, Channels};
 use crate::view::{
     self, Catalog, Filters, MeshMode, MeshPreview, MeshShading, RowIndex, SortColumn, TypeSort,
@@ -44,6 +45,7 @@ enum TaskKind {
     Load,
     Preview,
     Scene,
+    SceneOwners,
     ClassStructures,
     Export,
     Audio,
@@ -85,7 +87,12 @@ enum TaskPayload {
     Scene {
         generation: u64,
         nodes: Vec<SceneNode>,
-        rows: Vec<(usize, usize)>,
+        tree: SceneTree,
+    },
+    SceneOwners {
+        generation: u64,
+        revision: u64,
+        owners: Vec<AssetKey>,
     },
     ClassStructures {
         generation: u64,
@@ -282,7 +289,12 @@ pub struct StudioApp {
     scene: Vec<SceneNode>,
     scene_loaded: bool,
     scene_error: Option<String>,
-    scene_rows: Vec<(usize, usize)>,
+    scene_tree: SceneTree,
+    scene_focus: Option<usize>,
+    scene_matches: Vec<AssetKey>,
+    scene_match_index: usize,
+    pending_scene_reveal: Option<AssetKey>,
+    scene_reveal_revision: u64,
     pending_scene: bool,
     class_structures: Vec<ClassStructure>,
     classes_loaded: bool,
@@ -346,7 +358,12 @@ impl StudioApp {
             scene: Vec::new(),
             scene_loaded: false,
             scene_error: None,
-            scene_rows: Vec::new(),
+            scene_tree: SceneTree::default(),
+            scene_focus: None,
+            scene_matches: Vec::new(),
+            scene_match_index: 0,
+            pending_scene_reveal: None,
+            scene_reveal_revision: 0,
             pending_scene: false,
             class_structures: Vec::new(),
             classes_loaded: false,
@@ -657,7 +674,7 @@ impl StudioApp {
             let _ = sender.send(result);
             context.request_repaint();
         }) {
-            Ok(_) => self.task = Some(Task { receiver, kind, label, generation: self.generation, revision: match kind {TaskKind::Audio=>self.audio_revision,TaskKind::Preview=>self.preview_revision,_=>self.filter_revision} }),
+            Ok(_) => self.task = Some(Task { receiver, kind, label, generation: self.generation, revision: match kind {TaskKind::Audio=>self.audio_revision,TaskKind::Preview=>self.preview_revision,TaskKind::SceneOwners=>self.scene_reveal_revision,_=>self.filter_revision} }),
             Err(error) => self.error(format!("Could not start a background operation: {error}")),
         }
     }
@@ -734,7 +751,10 @@ impl StudioApp {
                 self.pending_preview = None;
                 self.pending_channels = None;
                 self.scene.clear();
-                self.scene_rows.clear();
+                self.scene_tree = SceneTree::default();
+                self.scene_focus = None;
+                self.scene_matches.clear();
+                self.pending_scene_reveal = None;
                 self.scene_loaded = false;
                 self.scene_error = None;
                 self.pending_scene = self.tab == Tab::Hierarchy;
@@ -831,14 +851,29 @@ impl StudioApp {
             Ok(TaskPayload::Scene {
                 generation,
                 nodes,
-                rows,
+                tree,
             }) => {
                 if self.generation == generation {
                     self.pending_scene = false;
-                    self.scene_rows = rows;
+                    self.scene_tree = tree;
                     self.scene = nodes;
                     self.scene_loaded = true;
                     self.scene_error = None;
+                }
+            }
+            Ok(TaskPayload::SceneOwners {
+                generation,
+                revision,
+                owners,
+            }) => {
+                if self.generation == generation && self.scene_reveal_revision == revision {
+                    self.scene_matches = owners;
+                    self.scene_match_index = 0;
+                    if let Some(&key) = self.scene_matches.first() {
+                        self.focus_scene_node(key);
+                    } else {
+                        self.error("No owning GameObject was found in the loaded files. The mesh may be unused, or its prefab may be in another bundle. Open the complete asset folder to resolve it.");
+                    }
                 }
             }
             Ok(TaskPayload::ClassStructures {
@@ -921,6 +956,11 @@ impl StudioApp {
                     self.scene_loaded = true;
                     self.log(true, error);
                 }
+                TaskKind::SceneOwners => {
+                    if self.generation == generation && self.scene_reveal_revision == revision {
+                        self.error(error);
+                    }
+                }
                 TaskKind::ClassStructures => {
                     if self.generation == generation {
                         self.pending_classes = false;
@@ -1002,10 +1042,11 @@ impl StudioApp {
                             .map(|nodes| {
                                 progress.update("Sorting hierarchy", 0, None);
                                 let rows = hierarchy_order(&nodes);
+                                let tree = SceneTree::new(&nodes, rows);
                                 TaskPayload::Scene {
                                     generation,
                                     nodes,
-                                    rows,
+                                    tree,
                                 }
                             })
                             .map_err(|error| error.to_string())
@@ -1013,6 +1054,30 @@ impl StudioApp {
                 );
                 return;
             }
+        }
+        if self.scene_loaded
+            && self.scene_error.is_none()
+            && let Some(key) = self.pending_scene_reveal.take()
+            && let Some(session) = self.session.clone()
+        {
+            let generation = self.generation;
+            let revision = self.scene_reveal_revision;
+            self.start_task_with_progress(
+                TaskKind::SceneOwners,
+                "Finding model in hierarchy",
+                context,
+                move |progress| {
+                    session
+                        .scene_owners(key, Some(&progress.observer()))
+                        .map(|owners| TaskPayload::SceneOwners {
+                            generation,
+                            revision,
+                            owners,
+                        })
+                        .map_err(|error| error.to_string())
+                },
+            );
+            return;
         }
         if self.pending_classes {
             self.pending_classes = false;
@@ -1314,22 +1379,45 @@ impl StudioApp {
         if self.task.is_some() {
             return;
         }
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let roots: Vec<_> = if selected {
-            self.assets
+        let mut roots: Vec<_> = if selected {
+            self.selected
                 .iter()
-                .filter(|asset| self.selected.contains(&asset.key) && asset.class_id == 1)
+                .filter_map(|key| self.by_key.get(key).map(|&index| &self.assets[index]))
+                .filter(|asset| matches!(asset.class_id, 1 | 95))
                 .map(|asset| asset.key)
                 .collect()
         } else {
             Vec::new()
         };
         if selected && roots.is_empty() {
-            self.error("Select at least one GameObject in the asset list or hierarchy first.");
+            self.error("Select a GameObject or Animator, or tick models in Scene hierarchy.");
             return;
         }
+        roots.sort_unstable();
+        self.export_model_roots(roots, format, context);
+    }
+
+    fn export_checked_models(&mut self, context: &egui::Context) {
+        let roots = self.scene_tree.checked_roots(&self.scene);
+        if roots.is_empty() {
+            self.error("Tick a model or subtree in Scene hierarchy first.");
+            return;
+        }
+        self.export_model_roots(roots, ModelFormat::FbxBinary, context);
+    }
+
+    fn export_model_roots(
+        &mut self,
+        roots: Vec<AssetKey>,
+        format: ModelFormat,
+        context: &egui::Context,
+    ) {
+        if self.task.is_some() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let Some(output) = rfd::FileDialog::new()
             .set_title("Choose model export folder")
             .pick_folder()
@@ -1352,6 +1440,34 @@ impl StudioApp {
                     .map_err(|error| error.to_string())
             },
         );
+    }
+
+    fn show_in_hierarchy(&mut self, key: AssetKey) {
+        self.tab = Tab::Hierarchy;
+        self.pending_preview = None;
+        self.pending_scene_reveal = Some(key);
+        self.scene_reveal_revision = self.scene_reveal_revision.wrapping_add(1);
+        self.scene_matches.clear();
+        if !self.scene_loaded || self.scene_error.is_some() {
+            self.scene_loaded = false;
+            self.scene_error = None;
+            self.pending_scene = true;
+        }
+    }
+
+    fn focus_scene_node(&mut self, key: AssetKey) {
+        if let Some(position) = self.scene_tree.reveal(key) {
+            self.tab = Tab::Hierarchy;
+            self.scene_focus = Some(position);
+            self.last_error = None;
+            self.selected.clear();
+            self.selected.insert(key);
+            self.anchor = Some(key);
+            self.request_preview(Some(key));
+            self.status = "Located GameObject. Tick the desired model root, then Export checked models (split).".into();
+        } else {
+            self.error("The owning GameObject is not present in the loaded hierarchy.");
+        }
     }
 
     fn export_cab_map(&mut self, context: &egui::Context) {
@@ -1541,6 +1657,16 @@ impl StudioApp {
                         self.export_assets(self.selected_keys(), &context);
                     }
                     ui.menu_button("Export", |ui| {
+                        if ui
+                            .add_enabled(
+                                self.scene_tree.checked_count > 0,
+                                egui::Button::new("Checked models · FBX (split)"),
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                            self.export_checked_models(&context);
+                        }
                         if ui
                             .add_enabled(
                                 !self.visible.is_empty(),
@@ -2046,6 +2172,9 @@ impl StudioApp {
             }
         });
         let mut clicked = None;
+        let mut right_clicked = None;
+        let mut reveal = None;
+        let mut export = false;
         egui::ScrollArea::both()
             .id_salt("asset-table")
             .auto_shrink([false, false])
@@ -2053,8 +2182,10 @@ impl StudioApp {
                 ui.set_min_width(width.max(520.0));
                 for row in range {
                     let asset = &self.assets[self.visible[row]];
-                    let (rect, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 29.0), Sense::click());
+                    let (rect, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 29.0), Sense::hover());
+                    let response =
+                        ui.interact(rect, ui.id().with(("asset-row", asset.key)), Sense::click());
                     let background = if self.selected.contains(&asset.key) {
                         Color32::from_gray(42)
                     } else if response.hovered() {
@@ -2067,6 +2198,7 @@ impl StudioApp {
                     ui.painter().rect_filled(rect, 2.0, background);
                     let mut row_ui = ui.new_child(
                         egui::UiBuilder::new()
+                            .id_salt(("asset-row-content", asset.key))
                             .max_rect(rect.shrink2(egui::vec2(4.0, 2.0)))
                             .layout(Layout::left_to_right(Align::Center)),
                     );
@@ -2100,6 +2232,27 @@ impl StudioApp {
                         let modifiers = ui.input(|input| input.modifiers);
                         clicked = Some((asset.key, modifiers.command, modifiers.shift));
                     }
+                    if response.secondary_clicked() {
+                        right_clicked = Some(asset.key);
+                    }
+                    response.context_menu(|ui| {
+                        if matches!(asset.class_id, 1 | 43 | 95)
+                            && ui.button("Show in scene hierarchy").clicked()
+                        {
+                            reveal = Some(asset.key);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.task.is_none(),
+                                egui::Button::new("Export selected assets"),
+                            )
+                            .clicked()
+                        {
+                            export = true;
+                            ui.close();
+                        }
+                    });
                     response.on_hover_text(format!(
                         "{}\n{}\nPath ID: {} · File: {}\n{}",
                         asset.name,
@@ -2130,6 +2283,20 @@ impl StudioApp {
                 self.request_preview(self.primary);
             }
         }
+        if let Some(key) = right_clicked
+            && !self.selected.contains(&key)
+        {
+            self.selected.clear();
+            self.selected.insert(key);
+            self.anchor = Some(key);
+            self.request_preview(Some(key));
+        }
+        if let Some(key) = reveal {
+            self.show_in_hierarchy(key);
+        }
+        if export {
+            self.export_assets(self.selected_keys(), ui.ctx());
+        }
     }
 
     fn hierarchy(&mut self, ui: &mut egui::Ui) {
@@ -2147,41 +2314,123 @@ impl StudioApp {
             }
             return;
         }
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} GameObjects", self.scene.len()))
-                    .small()
-                    .color(MUTED),
-            );
-            ui.label(
-                RichText::new("Select a GameObject, then use Export → Selected models.")
-                    .small()
-                    .color(MUTED),
-            );
+        let context = ui.ctx().clone();
+        ui.horizontal_wrapped(|ui| {
+            if let Some(key) = self.primary
+                && let Some(root) = self.scene_tree.model_root(&self.scene, key)
+                && ui.small_button("Model root").on_hover_text("Jump to the top-level GameObject containing the highlighted node.").clicked() {
+                self.focus_scene_node(root);
+            }
+            ui.label(RichText::new(format!("{} GameObjects · {} checked", self.scene.len(), self.scene_tree.checked_count)).small().color(MUTED));
+            if ui.small_button("Check all").clicked() { self.scene_tree.check_all(true); }
+            if ui.small_button("Uncheck all").clicked() { self.scene_tree.check_all(false); }
+            if ui.add_enabled(self.task.is_none() && self.scene_tree.checked_count > 0,
+                egui::Button::new(RichText::new("Export checked models (split)").color(BACKGROUND)).fill(ACCENT))
+                .on_hover_text("One FBX package per checked model root, including its children, materials and textures.").clicked() {
+                self.export_checked_models(&context);
+            }
+            if self.scene_matches.len() > 1 {
+                ui.label(format!("Owner {} / {}", self.scene_match_index + 1, self.scene_matches.len()));
+                if ui.small_button("Next owner").clicked() {
+                    self.scene_match_index = (self.scene_match_index + 1) % self.scene_matches.len();
+                    self.focus_scene_node(self.scene_matches[self.scene_match_index]);
+                }
+            }
         });
+        ui.label(RichText::new("Tick a model root to include its children. Use the arrows to expand or collapse branches.").small().color(MUTED));
         if self.scene.is_empty() {
             ui.label("No GameObject hierarchy was found in these files.");
         }
         let mut clicked = None;
-        egui::ScrollArea::both()
+        let mut checked = None;
+        let mut expanded = None;
+        let mut export_root = None;
+        let mut scroll = egui::ScrollArea::both()
             .id_salt("hierarchy")
-            .auto_shrink([false, false])
-            .show_rows(ui, 27.0, self.scene_rows.len(), |ui, range| {
-                for row in range {
-                    let (index, depth) = self.scene_rows[row];
-                    let node = &self.scene[index];
-                    ui.horizontal(|ui| {
-                        ui.add_space((depth.min(40) * 15) as f32);
-                        ui.label(RichText::new("◇").color(ACCENT));
-                        if ui
-                            .selectable_label(self.selected.contains(&node.key), &node.name)
-                            .clicked()
-                        {
-                            clicked = Some((node.key, ui.input(|input| input.modifiers.command)));
-                        }
-                    });
+            .auto_shrink([false, false]);
+        if let Some(position) = self.scene_focus.take() {
+            let offset = position as f32 * (27.0 + ui.spacing().item_spacing.y)
+                - ui.available_height() * 0.35;
+            scroll = scroll.vertical_scroll_offset(offset.max(0.0));
+        }
+        scroll.show_rows(ui, 27.0, self.scene_tree.visible.len(), |ui, range| {
+            for position in range {
+                let row = self.scene_tree.visible[position];
+                let (index, depth) = self.scene_tree.rows[row];
+                let node = &self.scene[index];
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().max(520.0), 27.0),
+                    Sense::hover(),
+                );
+                let response =
+                    ui.interact(rect, ui.id().with(("scene-row", node.key)), Sense::click());
+                if self.selected.contains(&node.key) {
+                    ui.painter().rect_filled(rect, 2.0, Color32::from_gray(42));
+                } else if response.hovered() {
+                    ui.painter().rect_filled(rect, 2.0, Color32::from_gray(27));
                 }
-            });
+                let mut row_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("scene-row-content", node.key))
+                        .max_rect(rect.shrink2(egui::vec2(3.0, 1.0)))
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                row_ui.style_mut().interaction.selectable_labels = false;
+                row_ui.add_space((depth.min(40) * 15) as f32);
+                if self.scene_tree.has_children(row) {
+                    let (_, arrow) =
+                        row_ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+                    egui::collapsing_header::paint_default_icon(
+                        &mut row_ui,
+                        if self.scene_tree.is_collapsed(row) {
+                            0.0
+                        } else {
+                            1.0
+                        },
+                        &arrow,
+                    );
+                    if arrow.clicked() {
+                        expanded = Some(row);
+                    }
+                } else {
+                    row_ui.add_space(20.0);
+                }
+                let mut value = self.scene_tree.is_checked(row);
+                if row_ui.checkbox(&mut value, "").changed() {
+                    checked = Some((row, value));
+                }
+                row_ui.label(&node.name);
+                if response.clicked() {
+                    clicked = Some((node.key, ui.input(|input| input.modifiers.command)));
+                }
+                response.context_menu(|ui| {
+                    if ui.button("Check subtree").clicked() {
+                        checked = Some((row, true));
+                        ui.close();
+                    }
+                    if ui.button("Uncheck subtree").clicked() {
+                        checked = Some((row, false));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.task.is_none(),
+                            egui::Button::new("Export this model (split)"),
+                        )
+                        .clicked()
+                    {
+                        export_root = Some(node.key);
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if let Some(row) = expanded {
+            self.scene_tree.toggle_expanded(row);
+        }
+        if let Some((row, value)) = checked {
+            self.scene_tree.set_checked(row, value);
+        }
         if let Some((key, toggle)) = clicked {
             if !toggle {
                 self.selected.clear();
@@ -2191,6 +2440,9 @@ impl StudioApp {
             }
             self.anchor = Some(key);
             self.request_preview(self.selected.contains(&key).then_some(key));
+        }
+        if let Some(key) = export_root {
+            self.export_model_roots(vec![key], ModelFormat::FbxBinary, &context);
         }
     }
 
@@ -3386,6 +3638,337 @@ pub fn smoke_test() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn interaction_frame(
+        app: &mut StudioApp,
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+        hierarchy: bool,
+    ) -> egui::FullOutput {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    if hierarchy {
+                        app.hierarchy(ui);
+                    } else {
+                        app.asset_table(ui);
+                    }
+                });
+            },
+        )
+    }
+
+    #[test]
+    #[ignore = "requires local Rust assets and ASSETSTUDIO_SCENE_NAV_OUT"]
+    fn real_rust_mesh_hierarchy_split_export() {
+        let input = PathBuf::from(
+            std::env::var_os("ASSETSTUDIO_PERF_INPUT").expect("set ASSETSTUDIO_PERF_INPUT"),
+        );
+        let output = PathBuf::from(
+            std::env::var_os("ASSETSTUDIO_SCENE_NAV_OUT").expect("set ASSETSTUDIO_SCENE_NAV_OUT"),
+        );
+        std::fs::create_dir_all(&output).unwrap();
+        let output = output.join(format!(
+            "run-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let now = std::time::Instant::now();
+        let session = Session::open(
+            &input,
+            &LoadOptions {
+                maximum_assets: 10_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        println!(
+            "Loaded {} assets in {:?}",
+            session.assets().len(),
+            now.elapsed()
+        );
+        let mesh = session
+            .assets()
+            .iter()
+            .find(|asset| asset.class_id == 43 && asset.name == "DragonLauncher_body")
+            .expect("the mesh shown in the user's screenshot");
+        let now = std::time::Instant::now();
+        let owners = session.scene_owners(mesh.key, None).unwrap();
+        assert!(!owners.is_empty());
+        println!("Mesh owners: {} in {:?}", owners.len(), now.elapsed());
+        let nodes = session.scene_outline_with_progress(None).unwrap();
+        let mut tree = SceneTree::new(&nodes, hierarchy_order(&nodes));
+        let root = tree.model_root(&nodes, owners[0]).unwrap();
+        let position = tree.reveal(root).unwrap();
+        tree.set_checked(tree.visible[position], true);
+        let roots = tree.checked_roots(&nodes);
+        assert_eq!(roots, vec![root]);
+        let now = std::time::Instant::now();
+        let report = session
+            .export_scene_with_options(
+                &output,
+                ModelFormat::FbxBinary,
+                &roots,
+                &ModelExportOptions::default(),
+            )
+            .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let models: Vec<_> = report
+            .written
+            .iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "fbx"))
+            .collect();
+        assert_eq!(models.len(), 1);
+        assert!(
+            std::fs::read(models[0])
+                .unwrap()
+                .starts_with(b"Kaydara FBX Binary")
+        );
+        let evidence = serde_json::json!({"mesh":mesh,"owners":owners,"root":root,"checked_nodes":tree.checked_count,"written":report.written,"failed":report.failed});
+        std::fs::write(
+            output.join("navigation-evidence.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+        println!("Exported checked model package in {:?}", now.elapsed());
+    }
+
+    fn text_point(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    Some(text.pos + egui::vec2(5.0, text.galley.size().y * 0.5))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing visible control {label}"))
+    }
+
+    fn branch_point(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        let name = text_point(output, label);
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Path(path) if path.closed && path.points.len() == 3 => {
+                    let rect = egui::Rect::from_points(&path.points);
+                    (rect.right() < name.x && (rect.center().y - name.y).abs() < 4.0)
+                        .then_some(rect.center())
+                }
+                _ => None,
+            })
+            .expect("painted hierarchy disclosure arrow")
+    }
+
+    fn pointer_click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    }
+
+    #[test]
+    fn right_click_on_mesh_text_opens_the_scene_navigation_action() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 51,
+        };
+        app.assets = Arc::new(vec![AssetRecord {
+            key,
+            class_id: 43,
+            class_name: "Mesh".into(),
+            name: "Mesh to locate".into(),
+            container: String::new(),
+            source: "CAB-test".into(),
+            size: 12,
+        }]);
+        let mut other = app.assets[0].clone();
+        other.key.path_id = 52;
+        other.name = "Other mesh".into();
+        Arc::make_mut(&mut app.assets).push(other);
+        app.visible = vec![0, 1];
+        let output = interaction_frame(&mut app, &context, vec![], false);
+        let pos = text_point(&output, "Mesh to locate");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(pos, egui::PointerButton::Secondary),
+            false,
+        );
+        // A filter/sort can finish while the popup is open. The menu must keep
+        // referring to the clicked asset, rather than its previous row index.
+        app.visible.reverse();
+        let output = interaction_frame(&mut app, &context, vec![], false);
+        let action = text_point(&output, "Show in scene hierarchy");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(action, egui::PointerButton::Primary),
+            false,
+        );
+        assert!(app.tab == Tab::Hierarchy);
+        assert_eq!(app.pending_scene_reveal, Some(key));
+        assert!(app.pending_scene);
+        assert!(app.selected.contains(&key));
+    }
+
+    fn hierarchy_fixture(app: &mut StudioApp) -> [AssetKey; 3] {
+        let keys = [1, 2, 3].map(|path_id| AssetKey {
+            file_index: 0,
+            path_id,
+        });
+        app.scene = vec![
+            SceneNode {
+                key: keys[0],
+                name: "Model parent".into(),
+                parent: None,
+            },
+            SceneNode {
+                key: keys[1],
+                name: "Child body".into(),
+                parent: Some(keys[0]),
+            },
+            SceneNode {
+                key: keys[2],
+                name: "Child wheels".into(),
+                parent: Some(keys[0]),
+            },
+        ];
+        app.scene_tree = SceneTree::new(&app.scene, hierarchy_order(&app.scene));
+        app.scene_loaded = true;
+        keys
+    }
+
+    #[test]
+    fn hierarchy_checkbox_and_expand_controls_work_without_text_intercepting_clicks() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let keys = hierarchy_fixture(&mut app);
+        let output = interaction_frame(&mut app, &context, vec![], true);
+        let name = text_point(&output, "Model parent");
+        let checkbox = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - rect.rect.height()).abs() < 0.1
+                        && (10.0..=24.0).contains(&rect.rect.width())
+                        && rect.rect.right() < name.x
+                        && (rect.rect.center().y - name.y).abs() < 4.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.right().total_cmp(&b.right()))
+            .expect("painted hierarchy checkbox")
+            .center();
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(checkbox, egui::PointerButton::Primary),
+            true,
+        );
+        assert_eq!(app.scene_tree.checked_count, 3);
+        assert_eq!(app.scene_tree.checked_roots(&app.scene), vec![keys[0]]);
+        let output = interaction_frame(&mut app, &context, vec![], true);
+        let arrow = branch_point(&output, "Model parent");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(arrow, egui::PointerButton::Primary),
+            true,
+        );
+        assert_eq!(app.scene_tree.visible, vec![0]);
+        assert_eq!(app.scene_tree.checked_count, 3);
+        let output = interaction_frame(&mut app, &context, vec![], true);
+        let arrow = branch_point(&output, "Model parent");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(arrow, egui::PointerButton::Primary),
+            true,
+        );
+        let output = interaction_frame(&mut app, &context, vec![], true);
+        let child = text_point(&output, "Child body");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(child, egui::PointerButton::Primary),
+            true,
+        );
+        assert_eq!(app.primary, Some(keys[1]));
+        assert_eq!(app.scene_tree.checked_count, 3);
+        let output = interaction_frame(&mut app, &context, vec![], true);
+        let root = text_point(&output, "Model root");
+        let _ = interaction_frame(
+            &mut app,
+            &context,
+            pointer_click(root, egui::PointerButton::Primary),
+            true,
+        );
+        assert_eq!(app.primary, Some(keys[0]));
+    }
+
+    #[test]
+    fn stale_scene_navigation_cannot_move_selection_and_current_navigation_expands_ancestors() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let keys = hierarchy_fixture(&mut app);
+        app.generation = 10;
+        app.scene_reveal_revision = 3;
+        app.scene_tree.toggle_expanded(0);
+        for (generation, revision) in [(9, 3), (10, 2), (10, 3)] {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            sender
+                .send(Ok(TaskPayload::SceneOwners {
+                    generation,
+                    revision,
+                    owners: vec![keys[1]],
+                }))
+                .unwrap();
+            app.task = Some(Task {
+                receiver,
+                kind: TaskKind::SceneOwners,
+                label: "Locate",
+                generation,
+                revision,
+            });
+            app.poll_task(&context);
+            if (generation, revision) != (10, 3) {
+                assert_eq!(app.primary, None);
+            }
+        }
+        assert_eq!(app.primary, Some(keys[1]));
+        assert_eq!(app.scene_focus, Some(1));
+        assert_eq!(app.scene_tree.visible, vec![0, 1, 2]);
+        assert!(app.tab == Tab::Hierarchy);
+    }
+
     #[test]
     fn clicking_text_in_every_asset_column_selects_the_whole_row() {
         let context = egui::Context::default();
@@ -4060,7 +4643,7 @@ mod tests {
             name: "Root object".to_owned(),
             parent: None,
         }];
-        app.scene_rows = vec![(0, 0)];
+        app.scene_tree = SceneTree::new(&app.scene, vec![(0, 0)]);
         app.log(false, "A completed operation");
         for view in 0..4 {
             let output = context.run(
@@ -4325,7 +4908,7 @@ mod tests {
             .send(Ok(TaskPayload::Scene {
                 generation: 3,
                 nodes: vec![],
-                rows: vec![],
+                tree: SceneTree::default(),
             }))
             .unwrap();
         app.task = Some(Task {

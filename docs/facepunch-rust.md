@@ -54,10 +54,25 @@ texture CABs. Opening only `content.bundle_unpacked` provides geometry but leave
 the external texture bundles unavailable. The desktop's catalog capacity defaults
 to ten million assets; change it in load settings when needed.
 
-Filter GameObjects/Animators, select the desired model and export binary FBX.
+To export a complete model from the asset list:
+
+1. Right-click a **Mesh**, **GameObject**, or **Animator** and choose **Show in scene hierarchy**.
+2. Use **Model root** to jump to the containing top-level model. If a mesh is reused,
+   **Next owner** visits its other GameObjects.
+3. Tick the desired root's checkbox. Its children are checked too. Branch arrows
+   expand/collapse the tree; clicking a row name selects its preview independently.
+4. Click **Export checked models (split)** and choose an output folder.
+
+Each highest checked node becomes a separate FBX package; nested checked children
+are included in that model rather than exported again. Keep the package together
+with its textures when importing into Blender. Export options also control skin,
+materials and animations. Package names use the prefab leaf plus a stable object
+identity so full asset paths do not become oversized directory/file names.
+
 Selected model preview/export reads that subtree and its required dependencies;
-unrelated objects do not consume its preview node limit. Keep the exported model
-folder together with its textures when importing into Blender.
+unrelated objects do not consume its preview node limit. Mesh-to-GameObject lookup
+is prepared lazily on the worker and reused for subsequent navigation, preserving
+the folder-loading path.
 
 ## CLI
 
@@ -80,6 +95,11 @@ Real PNG, WAV and OBJ exports validate. The camper FBX exports without failures
 and imports into Blender with 78 meshes, 34,188 vertices, 30,374 polygons, three
 materials and ten loaded images. These are sampled conversion checks, not an
 exhaustive conversion of all 6.6 million objects.
+
+The Mesh-to-hierarchy checkbox workflow also exports `DragonLauncher_body` through
+its complete viewmodel root. Blender independently imports ten meshes, one armature,
+20 animation actions and 25 loaded file images with no missing textures. Populated
+AnimatorController behaviour metadata is retained rather than rejected.
 
 Standalone Unity `.anim` files containing non-null object/script references still
 require Unity GUID metadata. Raw/JSON inspection remains available. This workflow

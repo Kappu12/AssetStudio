@@ -418,6 +418,93 @@ fn clip_object_with_constant(constant: bool) -> Vec<u8> {
 fn model_session() -> Session {
     model_session_with_clip(clip_object())
 }
+
+#[test]
+fn hierarchy_navigation_resolves_mesh_owners_and_split_exports_separate_packages() {
+    let mut second_transform = model_transform();
+    second_transform[4..12].copy_from_slice(&2_i64.to_le_bytes());
+    let mut second_filter = Vec::new();
+    push_pptr(&mut second_filter, 2);
+    push_pptr(&mut second_filter, 51);
+    let session = Session::from_regions(
+        [(
+            "CAB-owners".into(),
+            Region::from_bytes(objects_file(&[
+                (1, 1, model_game_object_named(&[11, 21, 31], "first-model")),
+                (1, 2, model_game_object_named(&[12, 22, 32], "second-model")),
+                (4, 11, model_transform()),
+                (4, 12, second_transform),
+                (33, 21, model_mesh_filter()),
+                (33, 22, second_filter),
+                (23, 31, model_renderer()),
+                (23, 32, model_renderer_for(2, 0, 0, 0, 61)),
+                (43, 51, model_mesh()),
+                (21, 61, material_object()),
+                (28, 71, texture_object("color", &[255, 0, 0, 255])),
+            ])),
+        )],
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let key = |path_id| AssetKey {
+        file_index: 0,
+        path_id,
+    };
+    let owners = session.scene_owners(key(51), None).unwrap();
+    assert_eq!(owners, vec![key(1), key(2)]);
+    assert_eq!(session.scene_owners(key(51), None).unwrap(), owners);
+    assert_eq!(session.scene_owners(key(1), None).unwrap(), vec![key(1)]);
+    assert!(session.scene_owners(key(71), None).is_err());
+    let output = tempfile::tempdir().unwrap();
+    let report = session
+        .export_scene(output.path(), ModelFormat::FbxBinary, &owners)
+        .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let models: Vec<_> = report
+        .written
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "fbx"))
+        .collect();
+    assert_eq!(models.len(), 2);
+    assert_ne!(models[0].parent(), models[1].parent());
+    assert!(
+        models
+            .iter()
+            .all(|path| fs::read(path).unwrap().starts_with(b"Kaydara FBX Binary"))
+    );
+}
+
+#[test]
+fn mesh_navigation_ignores_orphaned_and_superseded_filters() {
+    let filter = |owner, mesh| {
+        let mut bytes = Vec::new();
+        push_pptr(&mut bytes, owner);
+        push_pptr(&mut bytes, mesh);
+        bytes
+    };
+    let session = Session::from_regions(
+        [(
+            "CAB-filter-order".into(),
+            Region::from_bytes(objects_file(&[
+                (1, 1, model_game_object(&[21, 22])),
+                (1, 2, model_game_object_named(&[], "orphan-owner")),
+                (33, 21, filter(1, 51)),
+                (33, 22, filter(1, 52)),
+                (33, 23, filter(2, 51)),
+                (43, 51, model_mesh()),
+                (43, 52, model_mesh()),
+            ])),
+        )],
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let key = |path_id| AssetKey {
+        file_index: 0,
+        path_id,
+    };
+    assert!(session.scene_owners(key(51), None).unwrap().is_empty());
+    assert_eq!(session.scene_owners(key(52), None).unwrap(), vec![key(1)]);
+}
 fn model_session_with_clip(clip: Vec<u8>) -> Session {
     let preserve_fixture = clip == clip_object();
     let data = objects_file(&[

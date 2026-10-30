@@ -138,3 +138,15 @@ behavior. Shared-window, sparse/bulk-read, region/EOF and concurrent-cursor chec
 cover the cache. StudioObject exposes combined metadata access so catalog building
 does not repeat its name/container lookup. The application additionally shares its
 identity index with the GUI and skips unnecessary scans of short metadata strings.
+
+## Facepunch model controller follow-up
+
+AnimatorController tails now retain populated state/layer ranges, their behaviour
+indices, MonoBehaviour pointers and the threading flag. Range/index/reference,
+allocation and total-array budgets remain checked, along with exact tail consumption.
+Both-endian fixtures include malformed ranges, indices, truncations and reference
+budgets. The field layout is grounded in the
+[published Unity type dump](https://gist.github.com/capntrips/659bec02ab8f65347f40bd88aa0ef059/443ebfafeeb7d03321ba4b4d0afa830ee1a92962)
+and exercised by the supplied Facepunch DragonLauncher viewmodel controller. The
+application keeps its normal animation export settings; populated behaviour data
+no longer prevents model/clip conversion.

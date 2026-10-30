@@ -135,12 +135,7 @@ impl Session {
                     ));
                     continue;
                 };
-                let name = format!(
-                    "{}_{}_{}",
-                    component(&node.name),
-                    selected.file_index,
-                    selected.path_id
-                );
+                let name = model_package_name(&node.name, selected);
                 let result = build_model_ir_for_game_object(
                     self.studio.collection(),
                     &hierarchy,
@@ -362,6 +357,31 @@ fn hierarchy_for_animation(
     )?)
 }
 
+fn model_package_name(name: &str, key: SceneObjectKey) -> String {
+    // Prefab roots can be named with a complete asset path. Repeating that
+    // path as both directory and filename exceeds limits in FBX importers.
+    let leaf = name
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name);
+    let stem = leaf
+        .rsplit_once('.')
+        .filter(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "prefab" | "fbx" | "obj"
+            )
+        })
+        .map_or(leaf, |(stem, _)| stem);
+    let mut name = component(stem);
+    let mut end = name.len().min(48);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    format!("{}_{}_{}", component(&name), key.file_index, key.path_id)
+}
+
 pub(crate) fn resolve_model_root(session: &Session, key: AssetKey) -> Result<SceneObjectKey> {
     use unity_rs_core::scene::{SceneReadLimits, read_animator, resolve_object_reference};
     use unity_rs_core::serialized::ObjectReference;
@@ -393,4 +413,41 @@ pub(crate) fn resolve_model_root(session: &Session, key: AssetKey) -> Result<Sce
         file_index: target.file_index,
         path_id: target.object.path_id,
     })
+}
+
+#[cfg(test)]
+mod package_name_tests {
+    use super::*;
+
+    #[test]
+    fn names_use_the_prefab_leaf_stay_bounded_and_retain_unique_identity() {
+        let key = SceneObjectKey {
+            file_index: 117,
+            path_id: 8520,
+        };
+        assert_eq!(
+            model_package_name(
+                "assets/prefabs/skins/rocket_launcher_dragon.viewmodel.prefab",
+                key
+            ),
+            "rocket_launcher_dragon.viewmodel_117_8520"
+        );
+        assert_eq!(
+            model_package_name(r"assets\models\Cube.FBX", key),
+            "Cube_117_8520"
+        );
+        let long = model_package_name(&"模型".repeat(60), key);
+        assert!(long.len() <= 48 + "_117_8520".len());
+        assert!(long.ends_with("_117_8520"));
+        assert_ne!(
+            long,
+            model_package_name(
+                &"模型".repeat(60),
+                SceneObjectKey {
+                    file_index: 118,
+                    ..key
+                }
+            )
+        );
+    }
 }
