@@ -5,6 +5,7 @@ mod animation;
 pub mod asset_map;
 pub mod cab_map;
 mod catalog;
+pub mod class_structures;
 mod export;
 mod filter;
 mod font_preview;
@@ -12,6 +13,7 @@ pub mod game_objects;
 pub mod games;
 mod model;
 mod model_motion;
+mod model_options;
 mod model_preview;
 mod output;
 pub mod recovery;
@@ -27,4 +29,5 @@ pub use catalog::{
 pub use filter::AssetFilter;
 pub use session::Session;
 
-pub use model::ModelExportOptions;
+pub use model_options::ModelExportOptions;
+pub use unity_rs_core::fbx_ascii::{FbxExportSettings, FbxUvType};

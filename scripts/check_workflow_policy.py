@@ -4,6 +4,8 @@
 from pathlib import Path
 import re
 
+from package_release import check_vendored_backend_config
+
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_ACTIONS = {"actions/checkout", "actions/setup-python"}
 
@@ -41,7 +43,8 @@ def main() -> None:
     errors = check_policy(workflows[0].read_text(encoding="utf-8"))
     if errors:
         raise SystemExit("\n".join(errors))
-    print("Workflow policy verified: tag-only releases, read-only CI, no Actions artifacts/caches")
+    check_vendored_backend_config(ROOT)
+    print("Workflow policy verified: backend tests included, tag-only releases, read-only CI, no Actions artifacts/caches")
 
 
 if __name__ == "__main__":

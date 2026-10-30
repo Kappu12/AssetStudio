@@ -323,7 +323,7 @@ impl Session {
         })
     }
 
-    fn object_dump(&self, key: AssetKey, maximum: u64) -> Result<Vec<u8>> {
+    pub(crate) fn object_dump(&self, key: AssetKey, maximum: u64) -> Result<Vec<u8>> {
         use unity_rs_core::mono_schema::{
             MonoBehaviourSchemaIdentity, MonoBehaviourSchemaProvider, MonoBehaviourSchemaSource,
             read_mono_behaviour_value_with_provider,

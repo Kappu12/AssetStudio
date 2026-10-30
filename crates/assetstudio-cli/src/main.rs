@@ -11,8 +11,8 @@ use assetstudio_core::asset_map::{AssetMap, AssetMapFormat};
 use assetstudio_core::cab_map::CabMap;
 use assetstudio_core::unity_cn_keys::UnityCnKeys;
 use assetstudio_core::{
-    AssetFilter, AssetKey, AssetRecord, ExportMode, ExportOptions, GroupMode, ImageFormat,
-    LoadOptions, ModelExportOptions, ModelFormat, OperationReport, Session,
+    AssetFilter, AssetKey, AssetRecord, ExportMode, ExportOptions, FbxExportSettings, FbxUvType,
+    GroupMode, ImageFormat, LoadOptions, ModelExportOptions, ModelFormat, OperationReport, Session,
 };
 use clap::{Parser, ValueEnum};
 use serde_json::json;
@@ -142,6 +142,39 @@ struct Args {
     /// Omit model texture decoding and model-side image outputs.
     #[arg(long = "no-textures")]
     no_textures: bool,
+    /// Omit skin weights and bone bindings from converted models.
+    #[arg(long = "no-skins")]
+    no_skins: bool,
+    /// Omit model materials and their texture dependencies.
+    #[arg(long = "no-materials")]
+    no_materials: bool,
+    /// Omit model blend-shape geometry and its animation tracks.
+    #[arg(long = "no-blend-shapes")]
+    no_blend_shapes: bool,
+    /// Retain mesh/bone nodes and required ancestors, pruning unused scene nodes.
+    #[arg(long = "prune-nodes")]
+    prune_nodes: bool,
+    /// Positive geometry, bind-pose and translation scale.
+    #[arg(long = "scale-factor", default_value_t = 1.0)]
+    scale_factor: f32,
+    /// Preserve wrapped Euler values instead of unwrapping +/-180 degree jumps.
+    #[arg(long = "no-euler-filter")]
+    no_euler_filter: bool,
+    /// Enabled UV channel indexes, separated by commas.
+    #[arg(long = "uv-channels", value_delimiter = ',', num_args = 1..=8, value_parser = clap::value_parser!(u8).range(0..=7), default_value = "0,1,2,3,4,5,6,7")]
+    uv_channels: Vec<u8>,
+    /// UV semantic override, e.g. 1:NormalMap; repeat for several channels.
+    #[arg(long = "uv-slot", action = clap::ArgAction::Append)]
+    uv_slots: Vec<String>,
+    /// FBX schema version (7100, 7200, 7300, 7400, or 7500).
+    #[arg(long = "fbx-version", default_value_t = 7400)]
+    fbx_version: u32,
+    /// Mark every exported node as a joint in FBX.
+    #[arg(long = "cast-to-bone")]
+    cast_to_bone: bool,
+    /// FBX joint display size.
+    #[arg(long = "bone-size", default_value_t = 10.0)]
+    bone_size: f64,
     /// Write list, inspect, and scene output as JSON.
     #[arg(long)]
     json: bool,
@@ -335,10 +368,8 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
     // Validate every option before opening or creating anything.
     let validated = validate(args).map_err(|error| Failure::Usage(format!("{error:#}")))?;
     let load = validated.load.clone();
-    let model_options = ModelExportOptions {
-        include_animations: !args.no_animations,
-        include_textures: !args.no_textures,
-    };
+    let model_options =
+        model_options(args).map_err(|error| Failure::Usage(format!("{error:#}")))?;
     let export = ExportOptions {
         mode: match args.export_type {
             Mode::Convert => ExportMode::Convert,
@@ -623,7 +654,73 @@ fn execute(args: &Args, output: &mut impl Write) -> std::result::Result<u8, Fail
     Ok(if partial_load { code.max(3) } else { code })
 }
 
+fn model_options(args: &Args) -> Result<ModelExportOptions> {
+    let mut uv_enabled = [false; 8];
+    for &channel in &args.uv_channels {
+        *uv_enabled
+            .get_mut(usize::from(channel))
+            .context("UV channel must be between 0 and 7")? = true;
+    }
+    anyhow::ensure!(
+        args.uv_slots.len() <= 8,
+        "at most eight --uv-slot mappings may be supplied"
+    );
+    let mut fbx = FbxExportSettings {
+        version: args.fbx_version,
+        cast_to_bone: args.cast_to_bone,
+        bone_size: args.bone_size,
+        ..FbxExportSettings::default()
+    };
+    let mut mapped = [false; 8];
+    for mapping in &args.uv_slots {
+        anyhow::ensure!(mapping.len() <= 64, "UV slot mapping exceeds 64 bytes");
+        let (channel, semantic) = mapping
+            .split_once(':')
+            .context("UV slot mapping must be channel:semantic")?;
+        let channel = channel
+            .parse::<usize>()
+            .context("UV slot channel must be an integer from 0 to 7")?;
+        let slot = fbx
+            .uv_types
+            .get_mut(channel)
+            .context("UV slot channel must be between 0 and 7")?;
+        anyhow::ensure!(
+            !mapped[channel],
+            "a UV slot channel may only be mapped once"
+        );
+        mapped[channel] = true;
+        *slot = match semantic.to_ascii_lowercase().as_str() {
+            "diffuse" | "0" => FbxUvType::Diffuse,
+            "normalmap" | "normal-map" | "1" => FbxUvType::NormalMap,
+            "specular" | "2" => FbxUvType::Specular,
+            "bump" | "3" => FbxUvType::Bump,
+            "ambient" | "4" => FbxUvType::Ambient,
+            "emissive" | "5" => FbxUvType::Emissive,
+            "reflection" | "6" => FbxUvType::Reflection,
+            "displacement" | "7" => FbxUvType::Displacement,
+            _ => anyhow::bail!(
+                "UV semantic must be Diffuse, NormalMap, Specular, Bump, Ambient, Emissive, Reflection or Displacement"
+            ),
+        };
+    }
+    let options = ModelExportOptions {
+        include_animations: !args.no_animations,
+        include_textures: !args.no_textures,
+        include_skins: !args.no_skins,
+        include_materials: !args.no_materials,
+        include_blend_shapes: !args.no_blend_shapes,
+        export_all_nodes: !args.prune_nodes,
+        scale_factor: args.scale_factor,
+        euler_filter: !args.no_euler_filter,
+        uv_enabled,
+        fbx,
+    };
+    options.validate()?;
+    Ok(options)
+}
+
 fn validate(args: &Args) -> Result<Validated> {
+    let model = model_options(args)?;
     let compact_map_op = args
         .map_op
         .split([',', '|', '+'])
@@ -671,10 +768,12 @@ fn validate(args: &Args) -> Result<Validated> {
     if operation != args.operation && args.operation != Operation::Export {
         anyhow::bail!("--map_op conflicts with the selected --operation");
     }
-    if (args.no_animations || args.no_textures)
+    if model != ModelExportOptions::default()
         && !matches!(operation, Operation::Export | Operation::Model)
     {
-        anyhow::bail!("--no-animations and --no-textures apply to asset or model export");
+        anyhow::bail!(
+            "model controls (--no-animations, --no-textures, scale, UV and FBX settings) apply to asset or model export"
+        );
     }
     if args.mono_schemas.len() > 64 {
         anyhow::bail!("at most 64 --mono-schema files may be supplied");

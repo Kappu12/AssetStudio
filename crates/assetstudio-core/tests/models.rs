@@ -119,18 +119,22 @@ fn model_renderer() -> Vec<u8> {
     model_renderer_with_batch(0, 0)
 }
 fn model_renderer_with_batch(first: u16, count: u16) -> Vec<u8> {
+    model_renderer_for(1, first, count, 0, 61)
+}
+fn model_renderer_for(owner: i64, first: u16, count: u16, root: i64, material: i64) -> Vec<u8> {
     let mut output = Vec::new();
-    push_pptr(&mut output, 1);
+    push_pptr(&mut output, owner);
     output.extend_from_slice(&[1, 2, 1, 0, 0, 0, 0, 0, 0, 0]);
     pad(&mut output);
     output.extend_from_slice(&u32::MAX.to_le_bytes());
     push_i32(&mut output, 0);
     output.extend_from_slice(&[0_u8; 36]);
     push_i32(&mut output, 1);
-    push_pptr(&mut output, 61);
+    push_pptr(&mut output, material);
     output.extend_from_slice(&first.to_le_bytes());
     output.extend_from_slice(&count.to_le_bytes());
-    for _ in 0..3 {
+    push_pptr(&mut output, root);
+    for _ in 0..2 {
         push_pptr(&mut output, 0);
     }
     output.extend_from_slice(&[0_u8; 8]);
@@ -139,13 +143,24 @@ fn model_renderer_with_batch(first: u16, count: u16) -> Vec<u8> {
 }
 
 fn model_mesh() -> Vec<u8> {
+    model_mesh_parts(
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        &[[0, 1, 2]],
+        false,
+    )
+}
+fn model_mesh_parts(vertices: &[[f32; 3]], triangles: &[[u16; 3]], attributes: bool) -> Vec<u8> {
     let mut output = Vec::new();
     push_aligned_string(&mut output, "tri");
-    push_i32(&mut output, 1);
-    for value in [0_u32, 3, 0, 0, 0, 3] {
-        output.extend_from_slice(&value.to_le_bytes());
+    push_i32(&mut output, triangles.len() as i32);
+    for (index, triangle) in triangles.iter().enumerate() {
+        let first = *triangle.iter().min().unwrap() as u32;
+        let last = *triangle.iter().max().unwrap() as u32;
+        for value in [(index * 6) as u32, 3, 0, 0, first, last - first + 1] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        output.extend_from_slice(&[0_u8; 24]);
     }
-    output.extend_from_slice(&[0_u8; 24]);
     for _ in 0..3 {
         push_i32(&mut output, 0);
     }
@@ -156,22 +171,46 @@ fn model_mesh() -> Vec<u8> {
     output.extend_from_slice(&[0, 1, 0, 0]);
     pad(&mut output);
     push_i32(&mut output, 0);
-    push_i32(&mut output, 6);
-    for index in 0..3_u16 {
-        output.extend_from_slice(&index.to_le_bytes());
+    push_i32(&mut output, (triangles.len() * 6) as i32);
+    for triangle in triangles {
+        for index in triangle {
+            output.extend_from_slice(&index.to_le_bytes());
+        }
     }
     pad(&mut output);
 
-    // Vertex data: three positions in one stream.
-    output.extend_from_slice(&3_u32.to_le_bytes());
+    // Unity VertexData: position, optional source normal/color, no generated attributes.
+    output.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
     push_i32(&mut output, 5);
     output.extend_from_slice(&[0, 0, 0, 3]);
-    for _ in 0..4 {
-        output.extend_from_slice(&[0_u8; 4]);
-    }
-    push_i32(&mut output, 36);
-    for vertex in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
-        push_floats(&mut output, &vertex);
+    output.extend_from_slice(if attributes { &[0, 12, 0, 3] } else { &[0; 4] });
+    output.extend_from_slice(&[0; 4]);
+    output.extend_from_slice(if attributes { &[0, 24, 0, 4] } else { &[0; 4] });
+    output.extend_from_slice(&[0; 4]);
+    push_i32(
+        &mut output,
+        (vertices.len() * if attributes { 40 } else { 12 }) as i32,
+    );
+    for (index, vertex) in vertices.iter().enumerate() {
+        push_floats(&mut output, vertex);
+        if attributes {
+            push_floats(
+                &mut output,
+                &[
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    0.0,
+                ],
+            );
+            push_floats(
+                &mut output,
+                if index < 3 {
+                    &[1.0, 0.0, 0.0, 1.0]
+                } else {
+                    &[0.0, 0.0, 1.0, 1.0]
+                },
+            );
+        }
     }
     pad(&mut output);
 
@@ -271,8 +310,11 @@ fn align(bytes: &mut Vec<u8>, alignment: usize) {
     }
 }
 fn material_object() -> Vec<u8> {
+    material_named("Material", [1.0, 1.0, 1.0, 1.0])
+}
+fn material_named(name: &str, color: [f32; 4]) -> Vec<u8> {
     let mut out = Vec::new();
-    push_aligned_string(&mut out, "Material");
+    push_aligned_string(&mut out, name);
     push_pptr(&mut out, 0);
     push_i32(&mut out, 0);
     push_i32(&mut out, 0); // Valid and invalid keywords.
@@ -290,7 +332,7 @@ fn material_object() -> Vec<u8> {
     push_i32(&mut out, 0);
     push_i32(&mut out, 1);
     push_aligned_string(&mut out, "_Color");
-    push_floats(&mut out, &[1.0, 1.0, 1.0, 1.0]);
+    push_floats(&mut out, &color);
     out
 }
 fn animation_component() -> Vec<u8> {
@@ -402,6 +444,57 @@ fn model_session_with_clip(clip: Vec<u8>) -> Session {
 }
 
 #[test]
+fn disabling_materials_skips_unsupported_material_payloads() {
+    let mut unsupported_material = Vec::new();
+    push_aligned_string(&mut unsupported_material, "UnsupportedMaterial");
+    let data = objects_file(&[
+        (1, 1, model_game_object(&[11, 21, 31])),
+        (4, 11, model_transform()),
+        (33, 21, model_mesh_filter()),
+        (23, 31, model_renderer()),
+        (43, 51, model_mesh()),
+        // A present material with no supported payload must fail when requested,
+        // while opting out should still export its renderer's complete mesh.
+        (21, 61, unsupported_material),
+    ]);
+    let session = Session::from_regions(
+        [("CAB-model".into(), Region::from_bytes(data))],
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    assert!(
+        session
+            .export_scene(
+                &directory.path().join("with-materials"),
+                ModelFormat::Obj,
+                &[]
+            )
+            .is_err()
+    );
+    let output = directory.path().join("geometry");
+    let report = session
+        .export_scene_with_options(
+            &output,
+            ModelFormat::Obj,
+            &[],
+            &assetstudio_core::ModelExportOptions {
+                include_materials: false,
+                include_animations: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let obj = fs::read_to_string(output.join("scene/scene.obj")).unwrap();
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+    assert!(!obj.contains("material_0_61"));
+    let mtl = fs::read_to_string(output.join("scene/scene.mtl")).unwrap();
+    assert!(!mtl.contains("map_"));
+    assert!(!mtl.contains("UnsupportedMaterial"));
+}
+
+#[test]
 fn scene_mesh_preview_and_obj_material_textures_are_consistent() {
     let session = model_session();
     assert_eq!(session.scene().unwrap().len(), 1);
@@ -411,7 +504,10 @@ fn scene_mesh_preview_and_obj_material_textures_are_consistent() {
             path_id: 51,
         })
         .unwrap();
-    let Preview::Mesh { vertices, indices } = preview else {
+    let Preview::Mesh {
+        vertices, indices, ..
+    } = preview
+    else {
         panic!("mesh preview missing")
     };
     assert_eq!(vertices.len(), 3);
@@ -747,6 +843,7 @@ fn static_models_skip_unsupported_attached_animation_and_optional_textures() {
         let options = assetstudio_core::ModelExportOptions {
             include_animations: false,
             include_textures: false,
+            ..Default::default()
         };
         let report = session
             .export_scene_with_options(output.path(), format, &[], &options)
@@ -771,6 +868,7 @@ fn static_models_skip_unsupported_attached_animation_and_optional_textures() {
             &assetstudio_core::ModelExportOptions {
                 include_animations: false,
                 include_textures: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -864,7 +962,10 @@ fn game_object_and_animator_static_previews_use_world_geometry_without_animation
             path_id: 1,
         })
         .unwrap();
-    let Preview::Mesh { vertices, indices } = preview else {
+    let Preview::Mesh {
+        vertices, indices, ..
+    } = preview
+    else {
         panic!("GameObject preview is not geometry")
     };
     assert_eq!(vertices.len(), 3);
@@ -891,7 +992,9 @@ fn game_object_and_animator_static_previews_use_world_geometry_without_animation
         &LoadOptions::default(),
     )
     .unwrap();
-    let Preview::Mesh { vertices, indices } = session
+    let Preview::Mesh {
+        vertices, indices, ..
+    } = session
         .preview(AssetKey {
             file_index: 0,
             path_id: 81,
@@ -905,37 +1008,275 @@ fn game_object_and_animator_static_previews_use_world_geometry_without_animation
     assert_eq!(vertices[0], [2.0, 3.0, 4.0]);
 }
 
+fn batch_session(root: bool, second_range: u16) -> Session {
+    fn owner(mut payload: Vec<u8>, id: i64) -> Vec<u8> {
+        payload[4..12].copy_from_slice(&id.to_le_bytes());
+        payload
+    }
+    fn transform(id: i64, position: [f32; 3], scale: [f32; 3], rotation: [f32; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_pptr(&mut out, id);
+        push_floats(&mut out, &rotation);
+        push_floats(&mut out, &position);
+        push_floats(&mut out, &scale);
+        push_i32(&mut out, 0);
+        push_pptr(&mut out, 0);
+        out
+    }
+    let mut objects = vec![
+        (1, 1, model_game_object_named(&[11, 21, 31], "first")),
+        (
+            4,
+            11,
+            transform(1, [20.0, 30.0, 40.0], [2.0, 4.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+        ),
+        (33, 21, model_mesh_filter()),
+        (
+            23,
+            31,
+            model_renderer_for(1, 0, 1, if root { 13 } else { 0 }, 61),
+        ),
+        (1, 2, model_game_object_named(&[12, 22, 32], "second")),
+        (
+            4,
+            12,
+            transform(2, [-4.0, 8.0, 16.0], [-1.0, 2.0, 0.5], [0.0, 0.0, 0.0, 1.0]),
+        ),
+        (33, 22, owner(model_mesh_filter(), 2)),
+        (
+            23,
+            32,
+            model_renderer_for(2, second_range, 1, if root { 13 } else { 0 }, 62),
+        ),
+        (
+            43,
+            51,
+            model_mesh_parts(
+                &[
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                    [6.0, 0.0, 0.0],
+                    [4.0, 2.0, 0.0],
+                ],
+                &[[0, 1, 2], [3, 4, 5]],
+                true,
+            ),
+        ),
+        (21, 61, material_named("RedMaterial", [1.0, 0.0, 0.0, 1.0])),
+        (21, 62, material_named("BlueMaterial", [0.0, 0.0, 1.0, 1.0])),
+        (28, 71, texture_object("color", &[255, 0, 0, 255])),
+    ];
+    if root {
+        objects.extend([
+            (1, 3, model_game_object_named(&[13], "batch root")),
+            (
+                4,
+                13,
+                transform(
+                    3,
+                    [100.0, 10.0, 5.0],
+                    [2.0, 3.0, 4.0],
+                    [
+                        0.0,
+                        0.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                    ],
+                ),
+            ),
+        ]);
+    }
+    let data = objects_file(&objects);
+    if second_range == 1
+        && let Some(path) = std::env::var_os("ASSETSTUDIO_MODEL_TEST_OUT")
+    {
+        let folder = std::path::PathBuf::from(path);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join(if root {
+                "static-root.assets"
+            } else {
+                "static-world.assets"
+            }),
+            &data,
+        )
+        .unwrap();
+    }
+    Session::from_regions(
+        [("CAB-static-batch".into(), Region::from_bytes(data))],
+        &LoadOptions::default(),
+    )
+    .unwrap()
+}
+fn point_near(actual: [f32; 3], expected: [f32; 3]) {
+    for (a, e) in actual.into_iter().zip(expected) {
+        assert!((a - e).abs() < 0.0001, "{actual:?} != {expected:?}");
+    }
+}
+
 #[test]
-fn static_batches_fail_explicitly_before_preview_or_model_publication() {
+fn static_batches_compact_selected_submeshes_and_preserve_root_placement_and_materials() {
+    for has_root in [false, true] {
+        let session = batch_session(has_root, 1);
+        for (id, expected) in [
+            (
+                1,
+                if has_root {
+                    [[100.0, 10.0, 5.0], [100.0, 12.0, 5.0], [97.0, 10.0, 5.0]]
+                } else {
+                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+                },
+            ),
+            (
+                2,
+                if has_root {
+                    [[100.0, 18.0, 5.0], [100.0, 22.0, 5.0], [94.0, 18.0, 5.0]]
+                } else {
+                    [[4.0, 0.0, 0.0], [6.0, 0.0, 0.0], [4.0, 2.0, 0.0]]
+                },
+            ),
+        ] {
+            let Preview::Mesh {
+                vertices,
+                indices,
+                normals,
+                colors,
+            } = session
+                .preview(AssetKey {
+                    file_index: 0,
+                    path_id: id,
+                })
+                .unwrap()
+            else {
+                panic!("Static model preview missing")
+            };
+            assert_eq!(vertices.len(), 3);
+            assert_eq!(indices, [0, 1, 2]);
+            for (actual, expected) in vertices.into_iter().zip(expected) {
+                point_near(actual, expected);
+            }
+            let normal = if has_root {
+                [-0.5547002, 0.8320503, 0.0]
+            } else {
+                [
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    0.0,
+                ]
+            };
+            for actual in normals.unwrap() {
+                point_near(actual, normal);
+            }
+            assert_eq!(
+                colors.unwrap(),
+                vec![
+                    if id == 1 {
+                        [1.0, 0.0, 0.0, 1.0]
+                    } else {
+                        [0.0, 0.0, 1.0, 1.0]
+                    };
+                    3
+                ]
+            );
+        }
+        for format in [
+            ModelFormat::Obj,
+            ModelFormat::FbxAscii,
+            ModelFormat::FbxBinary,
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            let report = session.export_scene(output.path(), format, &[]).unwrap();
+            assert!(report.failed.is_empty(), "{:?}", report.failed);
+            if format == ModelFormat::Obj {
+                let obj = report
+                    .written
+                    .iter()
+                    .find(|path| path.extension().is_some_and(|ext| ext == "obj"))
+                    .unwrap();
+                let text = fs::read_to_string(obj).unwrap();
+                assert_eq!(
+                    text.lines().filter(|line| line.starts_with("v ")).count(),
+                    6
+                );
+                assert_eq!(
+                    text.lines().filter(|line| line.starts_with("f ")).count(),
+                    2
+                );
+                assert!(text.contains("usemtl material_0_61"));
+                assert!(text.contains("usemtl material_0_62"));
+            }
+            if let Some(path) = std::env::var_os("ASSETSTUDIO_MODEL_TEST_OUT") {
+                let folder = std::path::PathBuf::from(path).join(format!(
+                    "static-{}-{:?}",
+                    if has_root { "root" } else { "world" },
+                    format
+                ));
+                fs::create_dir_all(&folder).unwrap();
+                for file in &report.written {
+                    fs::copy(file, folder.join(file.file_name().unwrap())).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_static_batch_ranges_fail_before_publishing_model_files() {
+    let session = batch_session(false, 2);
+    let error = session
+        .preview(AssetKey {
+            file_index: 0,
+            path_id: 2,
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("static batch submesh range"), "{error}");
+    for format in [
+        ModelFormat::Obj,
+        ModelFormat::FbxAscii,
+        ModelFormat::FbxBinary,
+    ] {
+        let output = tempfile::tempdir().unwrap();
+        assert!(session.export_scene(output.path(), format, &[]).is_err());
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn unsupported_mesh_in_a_mixed_scene_is_reported_instead_of_silently_omitted() {
+    let mut unsupported = model_mesh();
+    // MeshTopology.Lines in the actual serialized SubMesh record.
+    unsupported[20..24].copy_from_slice(&3_i32.to_le_bytes());
+    let mut second_filter = model_mesh_filter();
+    second_filter[4..12].copy_from_slice(&2_i64.to_le_bytes());
+    second_filter[16..24].copy_from_slice(&52_i64.to_le_bytes());
+    let mut second_transform = model_transform();
+    second_transform[4..12].copy_from_slice(&2_i64.to_le_bytes());
     let data = objects_file(&[
         (1, 1, model_game_object(&[11, 21, 31])),
         (4, 11, model_transform()),
         (33, 21, model_mesh_filter()),
-        (23, 31, model_renderer_with_batch(0, 1)),
+        (23, 31, model_renderer()),
         (43, 51, model_mesh()),
+        (1, 2, model_game_object_named(&[12, 22, 32], "unsupported")),
+        (4, 12, second_transform),
+        (33, 22, second_filter),
+        (23, 32, model_renderer_for(2, 0, 0, 0, 61)),
+        (43, 52, unsupported),
         (21, 61, material_object()),
         (28, 71, texture_object("color", &[255, 0, 0, 255])),
     ]);
     let session = Session::from_regions(
-        [("CAB-static-batch".into(), Region::from_bytes(data))],
+        [("CAB-partial-model".into(), Region::from_bytes(data))],
         &LoadOptions::default(),
     )
     .unwrap();
-    let error = session
-        .preview(AssetKey {
-            file_index: 0,
-            path_id: 1,
-        })
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.to_ascii_lowercase().contains("static batch"),
-        "{error}"
-    );
     for format in [
+        ModelFormat::Obj,
         ModelFormat::FbxAscii,
         ModelFormat::FbxBinary,
-        ModelFormat::Obj,
     ] {
         let output = tempfile::tempdir().unwrap();
         let error = session
@@ -943,27 +1284,128 @@ fn static_batches_fail_explicitly_before_preview_or_model_publication() {
             .unwrap_err()
             .to_string();
         assert!(
-            error.to_ascii_lowercase().contains("static batch"),
+            error.contains("renderer") && error.contains("topology"),
             "{error}"
         );
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
+}
+
+#[test]
+fn empty_placeholder_meshes_remain_skippable_without_hiding_other_mesh_failures() {
+    let mut second_filter = model_mesh_filter();
+    second_filter[4..12].copy_from_slice(&2_i64.to_le_bytes());
+    second_filter[16..24].copy_from_slice(&52_i64.to_le_bytes());
+    let mut second_transform = model_transform();
+    second_transform[4..12].copy_from_slice(&2_i64.to_le_bytes());
+    let data = objects_file(&[
+        (1, 1, model_game_object(&[11, 21, 31])),
+        (4, 11, model_transform()),
+        (33, 21, model_mesh_filter()),
+        (23, 31, model_renderer()),
+        (43, 51, model_mesh()),
+        (1, 2, model_game_object_named(&[12, 22, 32], "empty")),
+        (4, 12, second_transform),
+        (33, 22, second_filter),
+        (23, 32, model_renderer_for(2, 0, 0, 0, 61)),
+        (43, 52, model_mesh_parts(&[], &[], false)),
+        (21, 61, material_object()),
+        (28, 71, texture_object("color", &[255, 0, 0, 255])),
+    ]);
+    let session = Session::from_regions(
+        [("CAB-empty-placeholder".into(), Region::from_bytes(data))],
+        &LoadOptions::default(),
+    )
+    .unwrap();
     let output = tempfile::tempdir().unwrap();
     let report = session
-        .export(
-            &[AssetKey {
-                file_index: 0,
-                path_id: 1,
-            }],
-            output.path(),
-            &assetstudio_core::ExportOptions::default(),
-        )
+        .export_scene(output.path(), ModelFormat::Obj, &[])
         .unwrap();
-    assert!(report.written.is_empty());
-    assert_eq!(report.failed.len(), 1);
-    assert!(
-        report.failed[0]
-            .to_ascii_lowercase()
-            .contains("static batch")
+    assert!(report.failed.is_empty());
+    let obj = report
+        .written
+        .iter()
+        .find(|path| path.extension().is_some_and(|ext| ext == "obj"))
+        .unwrap();
+    let text = fs::read_to_string(obj).unwrap();
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("v ")).count(),
+        3
     );
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("f ")).count(),
+        1
+    );
+}
+
+#[test]
+fn deeply_nested_child_first_serialized_scenes_return_bounded_fbx_errors() {
+    use unity_rs_core::{
+        fbx_ascii::write_model_ir_fbx_ascii,
+        fbx_binary_scene::write_model_ir_fbx_binary,
+        loader::{AssetCollection, AssetLoadOptions},
+        model_ir::{ModelIrLimits, build_model_ir},
+        scene_hierarchy::{SceneHierarchyLimits, build_scene_hierarchy},
+    };
+
+    const COUNT: i64 = 10_000;
+    const GAME_OBJECT_BASE: i64 = 100_000;
+    const TRANSFORM_BASE: i64 = 200_000;
+    let mut objects = Vec::new();
+    for index in 0..COUNT {
+        let owner = GAME_OBJECT_BASE + index;
+        let transform = TRANSFORM_BASE + index;
+        let components = if index == 0 {
+            vec![transform, 21, 31]
+        } else {
+            vec![transform]
+        };
+        objects.push((1, owner, model_game_object_named(&components, "deep-node")));
+        let mut data = Vec::new();
+        push_pptr(&mut data, owner);
+        push_floats(&mut data, &[0.0, 0.0, 0.0, 1.0]);
+        push_floats(&mut data, &[1.0, 2.0, 3.0]);
+        push_floats(&mut data, &[1.0; 3]);
+        push_i32(&mut data, i32::from(index > 0));
+        if index > 0 {
+            push_pptr(&mut data, transform - 1);
+        }
+        push_pptr(&mut data, if index + 1 < COUNT { transform + 1 } else { 0 });
+        objects.push((4, transform, data));
+    }
+    let mut filter = model_mesh_filter();
+    filter[4..12].copy_from_slice(&GAME_OBJECT_BASE.to_le_bytes());
+    objects.extend([
+        (33, 21, filter),
+        (23, 31, model_renderer_for(GAME_OBJECT_BASE, 0, 0, 0, 0)),
+        (43, 51, model_mesh()),
+    ]);
+    let collection = AssetCollection::load_regions_with_options(
+        [(
+            "CAB-deep-scene".into(),
+            Region::from_bytes(objects_file(&objects)),
+        )],
+        AssetLoadOptions::default(),
+    )
+    .unwrap();
+    let hierarchy = build_scene_hierarchy(&collection, SceneHierarchyLimits::default()).unwrap();
+    assert_eq!(hierarchy.nodes.len(), COUNT as usize);
+    let model = build_model_ir(&collection, &hierarchy, ModelIrLimits::default()).unwrap();
+    // This chain exceeds the independent bone-path work ceiling. Both writers
+    // must reach that ordinary bounded error without exhausting the call stack.
+    for binary in [false, true] {
+        let mut output = Vec::new();
+        let result = if binary {
+            write_model_ir_fbx_binary(&model, &mut output, 1024)
+        } else {
+            write_model_ir_fbx_ascii(&model, &mut output, 1024)
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("FBX bone paths use")
+        );
+        assert!(output.is_empty());
+    }
 }

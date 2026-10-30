@@ -43,11 +43,11 @@ pub(super) fn normalize(data: &[u8], profile: &str, path: &Path, maximum: u64) -
     );
     ensure!(
         compressed_info <= MAX_INFO_BYTES && uncompressed_info <= MAX_INFO_BYTES,
-        "Game bundle block table exceeds 64 MiB"
+        super::limit("Game bundle block table exceeds 64 MiB")
     );
     ensure!(
         uncompressed_info as u64 <= maximum,
-        "Game bundle table exceeds byte budget"
+        super::limit("Game bundle table exceeds byte budget")
     );
     if version >= 7 {
         reader.align16()?;
@@ -89,7 +89,11 @@ pub(super) fn normalize(data: &[u8], profile: &str, path: &Path, maximum: u64) -
     table.take(16)?; // Content hash.
     let count = usize::try_from(table.u32()?)?;
     ensure!(
-        count <= MAX_BLOCKS && count <= table.remaining() / 10,
+        count <= MAX_BLOCKS,
+        super::limit("Game bundle block count exceeds its limit")
+    );
+    ensure!(
+        count <= table.remaining() / 10,
         "Game bundle block count is invalid"
     );
     let mut data_position = if at_end { reader.position } else { info_end };
@@ -104,10 +108,10 @@ pub(super) fn normalize(data: &[u8], profile: &str, path: &Path, maximum: u64) -
         let block_flags = table.u16()?;
         total_expanded = total_expanded
             .checked_add(expanded)
-            .context("Game block expansion overflow")?;
+            .with_context(|| super::limit("Game block expansion overflow"))?;
         ensure!(
             total_expanded <= maximum,
-            "Game bundle expansion exceeds byte budget"
+            super::limit("Game bundle expansion exceeds byte budget")
         );
         let end = data_position
             .checked_add(compressed)
@@ -136,7 +140,11 @@ pub(super) fn normalize(data: &[u8], profile: &str, path: &Path, maximum: u64) -
     Ok(output)
 }
 
-fn decompress_table(input: &[u8], expected: usize, compression: u32) -> Result<Vec<u8>> {
+pub(super) fn decompress_table(input: &[u8], expected: usize, compression: u32) -> Result<Vec<u8>> {
+    ensure!(
+        input.len() <= MAX_INFO_BYTES && expected <= MAX_INFO_BYTES,
+        super::limit("Game bundle block table exceeds 64 MiB")
+    );
     match compression {
         0 => {
             ensure!(
@@ -158,7 +166,7 @@ fn decompress_table(input: &[u8], expected: usize, compression: u32) -> Result<V
             let memory = lzma_rust2::lzma_get_memory_usage_by_props(dictionary, properties)?;
             ensure!(
                 memory <= 64 * 1024,
-                "LZMA game table decoder memory exceeds 64 MiB"
+                super::limit("LZMA game table decoder memory exceeds 64 MiB")
             );
             let mut decoder = lzma_rust2::LzmaReader::new_with_props(
                 std::io::Cursor::new(&input[5..]),
@@ -168,7 +176,9 @@ fn decompress_table(input: &[u8], expected: usize, compression: u32) -> Result<V
                 None,
             )?;
             let mut output = Vec::new();
-            output.try_reserve_exact(expected)?;
+            output
+                .try_reserve_exact(expected)
+                .map_err(super::allocation_limit)?;
             output.resize(expected, 0);
             decoder.read_exact(&mut output)?;
             let mut tail = [0_u8; 1];
@@ -180,7 +190,9 @@ fn decompress_table(input: &[u8], expected: usize, compression: u32) -> Result<V
         }
         2 | 3 => {
             let mut output = Vec::new();
-            output.try_reserve_exact(expected)?;
+            output
+                .try_reserve_exact(expected)
+                .map_err(super::allocation_limit)?;
             output.resize(expected, 0);
             let written = lz4_flex::block::decompress_into(input, &mut output)?;
             ensure!(
@@ -394,7 +406,9 @@ fn netease_rc4(bytes: &mut [u8], key: u32) -> Result<()> {
     // Obtain the standard RC4 keystream with the tested compatibility helper,
     // then apply NetEase's rotate/add postprocessing to that keystream only.
     let mut stream = Vec::new();
-    stream.try_reserve_exact(bytes.len())?;
+    stream
+        .try_reserve_exact(bytes.len())
+        .map_err(super::allocation_limit)?;
     stream.resize(bytes.len(), 0);
     crypto::rc4(&mut stream, &key.to_le_bytes())?;
     for (byte, key) in bytes.iter_mut().zip(stream) {

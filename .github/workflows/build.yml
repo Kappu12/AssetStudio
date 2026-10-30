@@ -54,7 +54,7 @@ jobs:
             --profile minimal --component rustfmt --component clippy
           rustc --version
           cargo --version
-      - name: Check workflow storage and release policy
+      - name: Check source, storage and release policy
         run: python scripts/check_workflow_policy.py
       - name: Test packaging and release guards
         run: python -m unittest discover -s scripts/tests -v
@@ -64,7 +64,7 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Lint all targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Run tests
+      - name: Run application and vendored reader tests
         run: cargo test --workspace --all-targets --locked
       - name: Build native applications
         run: cargo build --workspace --release --locked

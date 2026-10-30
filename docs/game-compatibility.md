@@ -25,6 +25,12 @@ All accepted wrapper profiles expose a visible advisory through
 These advisories do not count as load failures or change a successful CLI exit
 status. Input files are never modified.
 
+The current selector accepts **27 of the 39** baseline profiles. Twelve remain
+explicit errors: GI/GI_Pack/GI_CB1/GI_CB2/GI_CB3/GI_CB3Pre, BH3/BH3Pre,
+ZZZ_CB1, SR_CB2/SR and ArknightsEndfield. Acceptance of a profile covers the
+implemented container and field variants below, not every historical layout or
+its opaque animation codec.
+
 | Legacy profile | Rust path | Remaining evidence or implementation |
 | --- | --- | --- |
 | Normal | Standard Unity backend | Per-class engine/platform limits remain; verify actual assets |
@@ -37,12 +43,12 @@ status. Input files are never modified.
 | GI_CB3Pre | Not implemented | BLK/mhy0 and custom serialized/object layouts |
 | BH3 | Not implemented | Encrypted bundle headers, mr0k blocks, custom renderers/meshes/animations |
 | BH3Pre | Not implemented | Encrypted bundle headers, mr0k blocks, custom renderers/animations |
-| BH3PrePre | Not implemented | Different encrypted bundle header order |
+| BH3PrePre | Historical encrypted header and pack-key mr0k blocks; player-layout override implemented | Original C# byte oracles and synthetic Session fixtures; other BH3 versions remain separate |
 | ZZZ_CB1 | Not implemented | mr0k compression and custom serialized/animation layouts |
 | SR_CB2 | Not implemented | mr0k compression, alignment and custom serialized/animation layouts |
 | SR | Not implemented | mr0k compression, alignment and custom serialized/renderer/animation layouts |
-| TOT | Not implemented | mr0k post-key and custom serialized layout |
-| Naraka | Not implemented | Replaced bundle signature, block size adjustment, material layout |
+| TOT | mr0k/post-key blocks, concatenated bundles and player-layout override implemented | Original C# byte oracles and synthetic Session fixtures; custom unmapped animation codecs remain unsupported |
+| Naraka | Signature/header normalization, block-size reconstruction and material field variant implemented | Synthetic Session TextAsset/Material checks; live game not tested |
 | EnsembleStars | Outer byte transform implemented | Synthetic transform checks; live game not tested |
 | OPFP | Fake-header plus per-compressed-block V0/V1 path-keyed transforms implemented | Synthetic front/end-table UnityFS checks; original `BundleResources` path required for encrypted paths |
 | FakeHeader | First/second UnityFS-header recovery implemented | Synthetic prefix and malformed-input checks |
@@ -62,16 +68,17 @@ status. Input files are never modified.
 | JJKPhantomParade | Generation-1 AES-256 counter wrapper implemented | Synthetic header/counter checks; current game versions not tested |
 | MuvLuvDimensions | Repeating XOR wrapper implemented | Exact synthetic output comparison |
 | PartyAnimals | Filename-derived tail XOR implemented | Original filename required; synthetic transform checks |
-| LoveAndDeepspace | Not implemented | Header XOR plus mesh/material/controller/shader/animation variants |
+| LoveAndDeepspace | Header XOR plus explicit mesh/material/controller/shader and animation-envelope layouts implemented | Original header-XOR oracle and synthetic parser/Session fixtures; opaque custom animation decoding remains unsupported |
 | SchoolGirlStrikers | Alternating-stride byte XOR implemented | Exact synthetic output comparison |
-| ExAstris | Not implemented | LZ4Lit blocks and texture/mesh/ACL animation variants |
+| ExAstris | LZ4Lit blocks, texture/mesh fields, animation header and resident dense quantization implemented | Original LZ4Lit oracle and synthetic parser/Session fixtures; 8/16/24/32-bit dense samples are bounded, nonzero generic quantization groups and unmapped custom ACL remain unsupported |
 | PerpetualNovelty | Encrypted block-table LZ4 prefix implemented | Synthetic front/end-table UnityFS checks; live game not tested |
 
 ## Shared safeguards
 
-Game wrappers are transformed entirely in Rust. Retained decoded wrappers have
-a cumulative 512 MiB ceiling per operation; each encoded input is also bounded
-before materialization. Encoding conversion can temporarily hold both copies,
+Game wrappers are transformed entirely in Rust. All selected paths share
+cumulative 512 MiB allowances for attempted encoded materializations and retained
+decoded wrappers. Failed decode attempts consume read work too. Conversion can
+temporarily hold multiple buffers,
 so the ceiling is not a claim about peak memory. Standard inputs and companion
 resources remain file-backed. Directory discovery limits files, directories,
 depth and path length, and rejects symbolic links. A malformed or unknown
@@ -83,10 +90,13 @@ or format failure is recorded as a visible diagnostic while other files can
 load. Shared directory, diagnostic and cumulative materialization limits still
 abort the operation; the option cannot bypass those limits.
 
-Normal/UnityCN split-input handling is provided by the standard backend.
-Combining encrypted game-specific `.splitN` parts before wrapper decoding is
-not implemented on this branch. Join those original parts first; keep source
-files unchanged and retain the original filename when the key depends on it.
+Normal/UnityCN split-input handling is provided by the standard backend. Game
+wrapper `.splitN` groups are discovered, sorted numerically and concatenated
+lazily before decoding. Selecting a later segment still resolves the complete
+group. Missing/duplicate indexes and simultaneous complete/split inputs fail
+explicitly; operation-wide source/read/decoded budgets also cover overlapping
+folder and multi-file selections. Filename-derived keys use the original
+logical filename, so renaming encrypted inputs can prevent decryption.
 
 MiHoYoBinData class 1208 uses an optional XOR byte. That simple object payload
 operation does not imply support for the GI/BH3/SR custom containers. IndexObject
@@ -98,6 +108,15 @@ implemented separately. Legacy CAB offsets into decrypted/decompressed streams
 are rejected explicitly; they cannot be treated as ordinary source offsets.
 Asset-index remote download and all game-specific object-layout equivalence
 still require separate implementation and evidence.
+
+The backend now has a separate native API for resident standard ACL samples:
+`unity_rs_core::acl::decode_compressed_tracks`. It accepts release scalar
+formats 7/10 and resident ACL 2.1 QVV format 10. Independent upstream ACL 2.1
+fixtures check actual samples. That does not map Ex Astris, Tuanjie or other
+custom Unity-fork curve indexes/bind poses into model or `.anim` output.
+External database/stream data, stripped keyframes, external default poses and
+development format versions 8/9 remain unsupported. Application exports still
+report unsupported custom ACL contracts explicitly.
 
 The OPFP, NetEase and PerpetualNovelty transforms operate on UnityFS versions
 6–8. They retain original block sizes and directory bytes and decrypt only the
@@ -113,6 +132,20 @@ header-bearing region. Synthetic inputs, selected golden outputs, the baseline
 source hash and provenance are recorded in
 `crates/assetstudio-core/tests/fixtures/game-oracle/`. The shipped app and CI
 tests remain Rust and do not execute .NET.
+
+Additional exact C# oracles for expanded-key AES/mr0k, LZ4Lit and the Love and
+Deepspace header transform are retained with hashes in
+`crates/assetstudio-core/tests/fixtures/mhy-oracle/`. Naraka, TOT, BH3PrePre,
+ExAstris and LoveAndDeepspace integration fixtures run through actual Session
+loading and object conversion. All of these inputs are synthetic.
+
+Love and Deepspace mesh conversion covers uniform packed morph records;
+mixed classic/packed or variable-width records and reserved layouts fail
+explicitly. Its shader parser validates and retains secondary code metadata,
+while text conversion uses the standard primary program blob. Parsing opaque
+secondary storage is not decompilation of that code. Empty custom animation
+envelopes can retain verified standard curves; nonempty custom caches/maps/ACL
+payloads still require a separately verified decoder.
 
 ## Provenance
 

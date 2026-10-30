@@ -4,16 +4,10 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail, ensure};
 use unity_rs_core::{
-    loader::AssetCollection,
     mesh::MeshReadLimits,
     model_ir::{
-        ModelIr, ModelIrLimits, ModelLocalTransform, ModelNode, ModelRendererKind,
-        build_model_ir_for_game_object,
+        ModelIr, ModelIrLimits, ModelLocalTransform, ModelNode, build_model_ir_for_game_object,
     },
-    renderer::{
-        RendererReadLimits, StaticBatchInfo, read_mesh_renderer, read_skinned_mesh_renderer,
-    },
-    scene::{ObjectReference, resolve_object_reference},
     scene_hierarchy::{SceneHierarchy, SceneHierarchyLimits, SceneObjectKey},
 };
 
@@ -68,7 +62,7 @@ pub(crate) fn preview_model(session: &Session, key: AssetKey) -> Result<Preview>
     } else {
         selected
     };
-    let mesh_count = selected_mesh_count(&hierarchy, selected)?;
+    let (mesh_count, mesh_variant_count) = selected_mesh_count(&hierarchy, selected)?;
     ensure!(
         mesh_count != 0,
         "Selected model contains no renderable mesh"
@@ -121,13 +115,16 @@ pub(crate) fn preview_model(session: &Session, key: AssetKey) -> Result<Preview>
             maximum_renderers: MAX_NODES * 2,
             maximum_material_references: 0,
             maximum_bone_references: 0,
-            maximum_meshes: mesh_count,
+            maximum_meshes: mesh_count
+                .checked_add(mesh_variant_count)
+                .context("Model preview mesh count overflow")?,
             maximum_materials: 0,
             maximum_avatars: 0,
             maximum_index_bytes: MAX_BYTES / 8,
             maximum_mesh_vertices: MAX_VERTICES,
             maximum_mesh_indices: MAX_INDICES,
             maximum_mesh_sub_meshes: MAX_INDICES / 3,
+            maximum_mesh_data_bytes: MAX_BYTES,
             maximum_material_entries: 0,
             maximum_avatar_elements: 0,
             maximum_total_string_bytes: MAX_BYTES / 8,
@@ -136,68 +133,13 @@ pub(crate) fn preview_model(session: &Session, key: AssetKey) -> Result<Preview>
         },
     )?;
     drop(hierarchy);
-    ensure_no_static_batches(session.studio.collection(), &model)?;
     combine_model(&model)
 }
 
-/// The backend's static model graph currently omits the renderer's batch
-/// subset and batch-root placement. Until those are retained, copying the
-/// shared mesh for each owner would duplicate unrelated triangles and place
-/// them incorrectly. Apply the same explicit boundary to preview and export.
-pub(crate) fn ensure_no_static_batches(
-    collection: &AssetCollection,
-    model: &ModelIr,
-) -> Result<()> {
-    for node in model.nodes.iter().filter(|node| node.export_content) {
-        for renderer in node
-            .renderers
-            .iter()
-            .filter(|renderer| renderer.mesh.is_some())
-        {
-            let key = renderer.component;
-            let source = resolve_object_reference(
-                collection,
-                key.file_index,
-                ObjectReference {
-                    file_id: 0,
-                    path_id: key.path_id,
-                },
-            )?
-            .context("Model renderer source component is missing")?;
-            let limits = RendererReadLimits::default();
-            let batch = match renderer.kind {
-                ModelRendererKind::MeshRenderer { .. } => {
-                    read_mesh_renderer(source.file, source.object_index, limits)?
-                        .renderer
-                        .static_batch_info
-                }
-                ModelRendererKind::SkinnedMeshRenderer { .. } => {
-                    read_skinned_mesh_renderer(source.file, source.object_index, limits)?
-                        .renderer
-                        .static_batch_info
-                }
-            };
-            require_unbatched(key, batch)?;
-        }
-    }
-    Ok(())
-}
-
-fn require_unbatched(key: SceneObjectKey, batch: StaticBatchInfo) -> Result<()> {
-    ensure!(
-        batch.sub_mesh_count == 0,
-        "Static batch model conversion is not implemented: renderer {}:{} selects {} shared submeshes starting at {}; its subset and batch-root placement must be preserved",
-        key.file_index,
-        key.path_id,
-        batch.sub_mesh_count,
-        batch.first_sub_mesh
-    );
-    Ok(())
-}
-
-fn selected_mesh_count(hierarchy: &SceneHierarchy, root: SceneObjectKey) -> Result<usize> {
+fn selected_mesh_count(hierarchy: &SceneHierarchy, root: SceneObjectKey) -> Result<(usize, usize)> {
     let mut visited = HashSet::new();
     let mut meshes = HashSet::new();
+    let mut variants = 0usize;
     let mut pending = Vec::new();
     pending.try_reserve_exact(hierarchy.nodes.len())?;
     visited.try_reserve(hierarchy.nodes.len())?;
@@ -221,6 +163,15 @@ fn selected_mesh_count(hierarchy: &SceneHierarchy, root: SceneObjectKey) -> Resu
             && node.mesh_renderer.is_some()
         {
             meshes.insert(key);
+            if node
+                .mesh_renderer
+                .as_ref()
+                .is_some_and(|renderer| renderer.static_batch.is_some())
+            {
+                variants = variants
+                    .checked_add(1)
+                    .context("Model preview variant count overflow")?;
+            }
         }
         if let Some(key) = node
             .skinned_mesh_renderer
@@ -238,7 +189,7 @@ fn selected_mesh_count(hierarchy: &SceneHierarchy, root: SceneObjectKey) -> Resu
         );
         pending.extend_from_slice(&node.children);
     }
-    Ok(meshes.len())
+    Ok((meshes.len(), variants))
 }
 
 fn combine_model(model: &ModelIr) -> Result<Preview> {
@@ -263,16 +214,20 @@ fn combine_model(model: &ModelIr) -> Result<Preview> {
         }
         for renderer in &node.renderers {
             let Some(key) = renderer.mesh else { continue };
-            let mesh = &model
-                .mesh(key)
-                .context("Model preview mesh is missing")?
-                .mesh;
+            let model_mesh = model.mesh(key).context("Model preview mesh is missing")?;
+            let mesh = &model_mesh.mesh;
             geometry.append_instance(
                 matrix,
                 &mesh.vertices,
                 mesh.sub_meshes
                     .iter()
                     .map(|submesh| submesh.indices.as_slice()),
+            )?;
+            geometry.append_channels(
+                matrix,
+                mesh.vertices.len(),
+                mesh.normals.as_deref(),
+                model_mesh.channels.colors.as_ref(),
             )?;
         }
     }
@@ -283,13 +238,27 @@ fn combine_model(model: &ModelIr) -> Result<Preview> {
     Ok(Preview::Mesh {
         vertices: geometry.vertices,
         indices: geometry.indices,
+        normals: geometry.normals,
+        colors: geometry.colors,
     })
 }
 
-#[derive(Default)]
 struct PreviewGeometry {
     vertices: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    normals: Option<Vec<[f32; 3]>>,
+    colors: Option<Vec<[f32; 4]>>,
+}
+
+impl Default for PreviewGeometry {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            normals: Some(Vec::new()),
+            colors: Some(Vec::new()),
+        }
+    }
 }
 
 impl PreviewGeometry {
@@ -332,7 +301,7 @@ impl PreviewGeometry {
             "Model preview exceeds 300,000 indices"
         );
         let bytes = total_vertices
-            .checked_mul(size_of::<[f32; 3]>())
+            .checked_mul(size_of::<[f32; 3]>() * 2 + size_of::<[f32; 4]>())
             .and_then(|n| {
                 total_indices
                     .checked_mul(size_of::<u32>())
@@ -352,6 +321,61 @@ impl PreviewGeometry {
                     base.checked_add(index)
                         .context("Model preview vertex index overflow")?,
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn append_channels(
+        &mut self,
+        matrix: Matrix,
+        vertex_count: usize,
+        normals: Option<&[[f32; 3]]>,
+        colors: Option<&unity_rs_core::mesh::MeshVertexAttribute>,
+    ) -> Result<()> {
+        if let Some(output) = &mut self.normals {
+            if let Some(normals) = normals {
+                ensure!(
+                    normals.len() == vertex_count,
+                    "Model source normals have the wrong vertex count"
+                );
+                output.try_reserve(vertex_count)?;
+                for &normal in normals {
+                    if let Some(normal) = matrix.normal(normal)? {
+                        output.push(normal);
+                    } else {
+                        self.normals = None;
+                        break;
+                    }
+                }
+            } else {
+                self.normals = None;
+            }
+        }
+        if let Some(output) = &mut self.colors {
+            if let Some(colors) = colors {
+                ensure!(
+                    matches!(colors.dimension, 3 | 4)
+                        && colors.values.len()
+                            == vertex_count
+                                .checked_mul(colors.dimension)
+                                .context("Model source color size overflow")?,
+                    "Model source colors must have three or four components per vertex"
+                );
+                output.try_reserve(vertex_count)?;
+                for value in colors.values.chunks_exact(colors.dimension) {
+                    ensure!(
+                        value.iter().all(|value| value.is_finite()),
+                        "Model source color is non-finite"
+                    );
+                    output.push(match value {
+                        [r, g, b] => [*r, *g, *b, 1.0],
+                        [r, g, b, a] => [*r, *g, *b, *a],
+                        _ => bail!("Model source color dimension is invalid"),
+                    });
+                }
+            } else {
+                self.colors = None;
             }
         }
         Ok(())
@@ -430,6 +454,58 @@ impl Matrix {
         }
         out.validate()?;
         Ok(out)
+    }
+
+    fn normal(self, normal: [f32; 3]) -> Result<Option<[f32; 3]>> {
+        ensure!(
+            normal.iter().all(|value| value.is_finite()),
+            "Model source normal is non-finite"
+        );
+        let a = self.0;
+        let cofactors = [
+            [
+                a[1][1] * a[2][2] - a[1][2] * a[2][1],
+                a[1][2] * a[2][0] - a[1][0] * a[2][2],
+                a[1][0] * a[2][1] - a[1][1] * a[2][0],
+            ],
+            [
+                a[0][2] * a[2][1] - a[0][1] * a[2][2],
+                a[0][0] * a[2][2] - a[0][2] * a[2][0],
+                a[0][1] * a[2][0] - a[0][0] * a[2][1],
+            ],
+            [
+                a[0][1] * a[1][2] - a[0][2] * a[1][1],
+                a[0][2] * a[1][0] - a[0][0] * a[1][2],
+                a[0][0] * a[1][1] - a[0][1] * a[1][0],
+            ],
+        ];
+        let determinant = (0..3).map(|c| a[0][c] * cofactors[0][c]).sum::<f64>();
+        if determinant == 0.0 {
+            return Ok(None);
+        }
+        ensure!(
+            determinant.is_finite(),
+            "Model source normal transform is non-finite"
+        );
+        let transformed = cofactors.map(|row| {
+            (0..3)
+                .map(|c| row[c] * f64::from(normal[c]) / determinant)
+                .sum::<f64>()
+        });
+        let norm = transformed
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        ensure!(
+            norm.is_finite(),
+            "Model transformed source normal is non-finite"
+        );
+        Ok(Some(if norm == 0.0 {
+            [0.0; 3]
+        } else {
+            transformed.map(|value| (value / norm) as f32)
+        }))
     }
 
     fn point(self, point: [f32; 3]) -> Result<[f32; 3]> {
@@ -612,6 +688,7 @@ mod tests {
         let mut geometry = PreviewGeometry {
             vertices: vec![[0.0; 3]; MAX_VERTICES],
             indices: Vec::new(),
+            ..PreviewGeometry::default()
         };
         assert!(
             geometry
@@ -640,30 +717,19 @@ mod tests {
     }
 
     #[test]
-    fn static_batches_are_explicitly_rejected_instead_of_duplicating_shared_geometry() {
-        let key = SceneObjectKey {
-            file_index: 2,
-            path_id: 17,
-        };
-        require_unbatched(
-            key,
-            StaticBatchInfo {
-                first_sub_mesh: 0,
-                sub_mesh_count: 0,
-            },
-        )
-        .unwrap();
-        let error = require_unbatched(
-            key,
-            StaticBatchInfo {
-                first_sub_mesh: 3,
-                sub_mesh_count: 4,
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("Static batch"));
-        assert!(error.contains("2:17"));
-        assert!(error.contains("4 shared submeshes starting at 3"));
+    fn source_normals_use_inverse_transpose_and_missing_channels_stay_missing() {
+        let mut matrix = Matrix::IDENTITY;
+        matrix.0[0][0] = 2.0;
+        let value = matrix.normal([1.0, 1.0, 0.0]).unwrap().unwrap();
+        assert!((value[0] - 0.4472136).abs() < 0.0001);
+        assert!((value[1] - 0.8944272).abs() < 0.0001);
+        matrix.0[0][0] = 0.0;
+        assert!(matrix.normal([1.0, 0.0, 0.0]).unwrap().is_none());
+        let mut geometry = PreviewGeometry::default();
+        geometry
+            .append_channels(Matrix::IDENTITY, 1, None, None)
+            .unwrap();
+        assert!(geometry.normals.is_none());
+        assert!(geometry.colors.is_none());
     }
 }

@@ -1,5 +1,10 @@
 # Independent bug sweep 2
 
+Historical checkpoint report. Its counts, source ledger and remaining-feature
+statements describe the pre-resume snapshot. The
+[current targeted addendum](#resumed-targeted-review-2026-10-30) below records
+subsequent review and supersedes those old compatibility limits where stated.
+
 Reviewer: rust_gui. Scope: new first-party Rust application code, tests, manifests, GitHub workflow and release scripts. Sources were read in full, with subsequent changes reviewed again; tables/constants additionally received mechanical comparison against the C# baseline. This is not a full source audit of the pinned external Unity backend or every transitive dependency. A SHA-256/line-count inventory is in sweep2-source-ledger.json.
 
 ## Coverage ledger
@@ -58,3 +63,57 @@ No git commit, push, tag, release or PR was performed by this reviewer.
 Final fixture-only review: the unused 635 KiB csharp_lz4_multiblock.json was removed; the actual C# multiblock binary and Oracle.cs remain. The existing acceptance loop now also compares every Container against Assets/UI/{index}.txt, completing all five legacy fields. Fixture README explains deterministic expected records and the omission. Runtime source hashes are unchanged. This reviewer did not queue another Cargo job; parent owns the narrow assertion rerun.
 
 Final delivery-only review: package_release.py now includes docs/reviews/sweep2.md and docs/reviews/sweep2-source-ledger.json at their original paths, preserving the links in docs/review-sweeps.md. The existing package test creates both files and verifies their exact ZIP contents alongside the linked review index. Only these two Python source hashes changed; runtime source remains frozen. Parent reports all 32 final pipeline tests and policy checks pass. No further findings.
+
+## Resumed targeted review, 2026-10-30
+
+Independent reviewers inspected the resumed feature paths and the relevant
+backend handoffs. This addendum does not extend the old ledger into a claimed
+line-by-line audit of all vendored code or transitive dependencies. The current
+combined workspace gates are pending; historical test totals above remain tied
+to their earlier source snapshot.
+
+Confirmed findings addressed during resumed review include shared multi-input
+game-buffer allowances resetting per selection or being swallowed by continue
+mode; pruning confusing bone Transform keys with GameObject keys; binary FBX
+omitting vertex/material layers and retaining ASCII name prefixes; textures
+referencing disabled/absent UV0 or aliasing different material transforms;
+nonempty unsupported meshes silently disappearing from mixed scenes; and
+recursive FBX transform assembly exhausting the stack on a valid 10,000-node
+child-first graph. Each has a focused regression at the owning layer.
+
+Targeted writer verification passed 51 FBX tests before the final combined
+gates. `scripts/validate_fbx_channels.py` independently imported sixteen actual
+outputs with ufbx 0.0.5: ASCII/binary 7100/7200/7300/7400/7500; UV1 common to two
+meshes; no-UV omission; and two materials with different transforms sharing one
+image. Checks include imported names, mirrored positions/winding, normals,
+tangent XYZ, RGBA, UV0–7, polygon materials, channel bindings and bone Size.
+Serialized tangent W is checked by the Rust record parser; no independent ufbx
+tangent-W or evaluated humanoid-pose claim is made. The wheel's borrowed-wrapper
+cleanup issue is isolated to disposable reader processes after assertions.
+
+To reproduce these optional development-reader checks:
+
+```sh
+python -m pip install ufbx==0.0.5
+ASSETSTUDIO_FBX_WRITER_TEST_OUT=/tmp/assetstudio-fbx \
+  cargo test -p unity-rs-core --lib fbx_ --locked
+python scripts/validate_fbx_channels.py /tmp/assetstudio-fbx
+```
+
+Independent class/GUI review traced full tree scan accounting, replaced-entry
+budgets, source-safe export, worker generations, same-key preview revisions and
+transactional preference restoration. Independent game review traced shared
+encoded-read/retained/source budgets, numeric split order and fatal-limit
+classification. Format fixtures for modern `.anim`, variant objects and native
+standard ACL are synthetic and retain their own provenance. The ACL oracle uses
+the real upstream compressor/decompressor only in development; shipped code and
+normal Cargo tests do not run C++ or .NET.
+
+Static batches, source-normal/color preview, detailed FBX settings, modern
+standard muscle-stream expansion and encrypted split joining are now implemented
+within their documented limits. Standard resident ACL decoding is a separate
+low-level API, not proof of custom Unity-fork binding-map compatibility. The
+[current matrices](../feature-parity.md) retain rejected profiles, GUID remapping,
+opaque codecs and native-platform acceptance gaps. The backend patch record and
+release source digest identify the modified code; Actions-hosted execution
+remains unverified and no tag or release has been created.

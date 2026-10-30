@@ -63,6 +63,7 @@ impl Session {
         let mut resources = HashSet::new();
         let mut expanded = 0u64;
         let mut objects = 0usize;
+        let mut game_budget = crate::games::GamePreparationBudget::new(MAX_EXPORT_FILE_BYTES)?;
         for input in inputs {
             let canonical = match std::fs::canonicalize(input) {
                 Ok(path) => path,
@@ -85,10 +86,10 @@ impl Session {
             canonical_inputs.push(canonical.clone());
             let mut preprocess_diagnostics = Vec::new();
             let result: Result<AssetCollection> = (|| {
-                let (prepared, diagnostics) = crate::games::prepare_regions_with_policy(
+                let (prepared, diagnostics) = crate::games::prepare_regions_with_budget(
                     &canonical,
                     &options.game,
-                    MAX_EXPORT_FILE_BYTES,
+                    &mut game_budget,
                     options.continue_on_error,
                 )?;
                 preprocess_diagnostics = diagnostics;
@@ -101,7 +102,9 @@ impl Session {
             })();
             let collection = match result {
                 Ok(value) => value,
-                Err(error) if options.continue_on_error => {
+                Err(error)
+                    if options.continue_on_error && !crate::games::is_preparation_limit(&error) =>
+                {
                     parts
                         .diagnostics
                         .push(unity_rs_core::loader::LoadDiagnostic {
@@ -477,7 +480,40 @@ impl Session {
                     maximum_output_bytes: 64 * 1024 * 1024,
                     ..MeshReadLimits::default()
                 };
-                let mesh = object.read_mesh(limits)?.mesh;
+                let geometry = object.read_mesh(limits)?;
+                let mesh = geometry.mesh;
+                let colors = match geometry.channels.colors {
+                    Some(attribute) => {
+                        let dimension = attribute.dimension;
+                        if !matches!(dimension, 3 | 4)
+                            || attribute.values.len()
+                                != mesh
+                                    .vertices
+                                    .len()
+                                    .checked_mul(dimension)
+                                    .context("preview color count overflow")?
+                        {
+                            bail!(
+                                "mesh preview source colors must have three or four components per vertex"
+                            );
+                        }
+                        let mut colors = Vec::new();
+                        colors.try_reserve_exact(mesh.vertices.len())?;
+                        for color in attribute.values.chunks_exact(dimension) {
+                            if color.iter().any(|value| !value.is_finite()) {
+                                bail!("mesh preview source colors contain non-finite values");
+                            }
+                            colors.push([
+                                color[0],
+                                color[1],
+                                color[2],
+                                color.get(3).copied().unwrap_or(1.0),
+                            ]);
+                        }
+                        Some(colors)
+                    }
+                    None => None,
+                };
                 let mut indices = Vec::new();
                 for submesh in &mesh.sub_meshes {
                     if indices
@@ -494,6 +530,8 @@ impl Session {
                 Ok(Preview::Mesh {
                     vertices: mesh.vertices,
                     indices,
+                    normals: mesh.normals,
+                    colors,
                 })
             }
             49 => Ok(Preview::Text(
@@ -533,6 +571,18 @@ impl Session {
                 }
             },
         }
+    }
+
+    /// Bounded serialized-object dump, including recovered MonoBehaviour schemas.
+    pub fn preview_dump(&self, key: AssetKey) -> Result<String> {
+        String::from_utf8(self.object_dump(key, MAX_PREVIEW_TEXT_BYTES as u64)?)
+            .context("serialized dump is not UTF-8")
+    }
+
+    /// Bounded structured JSON for the selected object's complete decoded value.
+    pub fn preview_json(&self, key: AssetKey) -> Result<String> {
+        String::from_utf8(self.object_json_with_limit(key, MAX_PREVIEW_TEXT_BYTES)?)
+            .context("serialized JSON is not UTF-8")
     }
 
     /// Decodes supported audio to a bounded self-contained WAV for desktop playback.
@@ -612,6 +662,7 @@ impl Session {
             }
         }
         let mut remaining_output = MAX_EXPORT_TOTAL_BYTES;
+        let mut game_budget = crate::games::GamePreparationBudget::new(MAX_EXPORT_FILE_BYTES)?;
         for (index, input) in readable {
             let target = if inputs.len() == 1 {
                 output.to_owned()
@@ -625,13 +676,16 @@ impl Session {
                 overwrite,
                 Some(&protection),
                 &mut remaining_output,
+                &mut game_budget,
             ) {
                 Ok(report) => {
                     result.written.extend(report.written);
                     result.skipped.extend(report.skipped);
                     result.failed.extend(report.failed);
                 }
-                Err(error) if options.continue_on_error => {
+                Err(error)
+                    if options.continue_on_error && !crate::games::is_preparation_limit(&error) =>
+                {
                     result.failed.push(format!("input {input:?}: {error:#}"))
                 }
                 Err(error) => return Err(error),
@@ -647,6 +701,7 @@ impl Session {
         overwrite: bool,
     ) -> Result<OperationReport> {
         let mut remaining_output = MAX_EXPORT_TOTAL_BYTES;
+        let mut game_budget = crate::games::GamePreparationBudget::new(MAX_EXPORT_FILE_BYTES)?;
         Self::extract_with_guard(
             input,
             output,
@@ -654,6 +709,7 @@ impl Session {
             overwrite,
             None,
             &mut remaining_output,
+            &mut game_budget,
         )
     }
 
@@ -664,6 +720,7 @@ impl Session {
         overwrite: bool,
         additional: Option<&crate::source_protection::SourceProtection>,
         remaining_output: &mut u64,
+        game_budget: &mut crate::games::GamePreparationBudget,
     ) -> Result<OperationReport> {
         crate::games::validate_profile(&options.game)?;
         let load = backend_options(options)?;
@@ -686,10 +743,10 @@ impl Session {
         };
         extraction.limits.maximum_output_bytes = *remaining_output;
         let mut result = OperationReport::default();
-        let (prepared, preprocess_diagnostics) = crate::games::prepare_regions_with_policy(
+        let (prepared, preprocess_diagnostics) = crate::games::prepare_regions_with_budget(
             input,
             &options.game,
-            MAX_EXPORT_FILE_BYTES,
+            game_budget,
             options.continue_on_error,
         )?;
         result.failed.extend(preprocess_diagnostics);
@@ -836,6 +893,14 @@ pub(crate) fn backend_options(options: &LoadOptions) -> Result<AssetLoadOptions>
     Ok(AssetLoadOptions {
         unity_version_override,
         unity_cn_key,
+        game_variant: match options.game.to_ascii_lowercase().as_str() {
+            "naraka" => unity_rs_core::game_variant::GameVariant::Naraka,
+            "tot" => unity_rs_core::game_variant::GameVariant::TearsOfThemis,
+            "bh3prepre" => unity_rs_core::game_variant::GameVariant::HonkaiImpact3PrePre,
+            "exastris" => unity_rs_core::game_variant::GameVariant::ExAstris,
+            "loveanddeepspace" => unity_rs_core::game_variant::GameVariant::LoveAndDeepspace,
+            _ => unity_rs_core::game_variant::GameVariant::Standard,
+        },
         failure_policy: if options.continue_on_error {
             LoadFailurePolicy::SkipInput
         } else {
@@ -888,6 +953,8 @@ mod tests {
         std::fs::write(&second, b"second payload").unwrap();
         let output = tempfile::tempdir().unwrap();
         let mut remaining = 20;
+        let mut game_budget =
+            crate::games::GamePreparationBudget::new(MAX_EXPORT_FILE_BYTES).unwrap();
         let first_report = Session::extract_with_guard(
             &first,
             &output.path().join("first"),
@@ -895,6 +962,7 @@ mod tests {
             false,
             None,
             &mut remaining,
+            &mut game_budget,
         )
         .unwrap();
         assert_eq!(first_report.written.len(), 1);
@@ -906,6 +974,7 @@ mod tests {
             false,
             None,
             &mut remaining,
+            &mut game_budget,
         )
         .unwrap();
         assert!(second_report.written.is_empty());

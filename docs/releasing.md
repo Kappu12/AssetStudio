@@ -3,6 +3,10 @@
 The Rust workflow builds, lints, and tests the locked workspace on GitHub-hosted
 Linux, Windows, and macOS runners. Pushes to `main` and `rust-rewrite`, pull
 requests to either branch, and manual runs perform validation only.
+The vendored Unity reader is an explicit workspace member, so the same locked
+format/check/Clippy/test commands cover its own tests and the applications.
+The policy gate refuses a configuration that removes the reader from those
+workspace checks or bypasses the reviewed local Cargo patch.
 
 Windows x64 builds statically link the MSVC runtime through the target-specific
 Cargo configuration. The packager inspects both ordinary and delayed PE import
@@ -24,7 +28,9 @@ When a release is explicitly authorized:
    Only after they succeed does its Windows release job rebuild the applications.
 5. It packages `AssetStudio.exe`, `AssetStudioCLI.exe`, the baseline `Keys.json`
    registry, documentation, copyright notices, the backend's third-party license
-   bundle, and a dependency inventory. It verifies the ZIP's contents and hashes
+   bundle/local patch record, and a dependency inventory. The inventory records
+   both the upstream revision and a digest of the local reader source (including
+   binary decoder tables). It verifies the ZIP's contents and hashes
    and executes both packaged applications' smoke checks.
 6. It creates or resumes a draft GitHub Release, uploads the ZIP and SHA-256 file,
    downloads those assets to verify their bytes, and then publishes. A version

@@ -1,7 +1,4 @@
-//! Unity `.anim` output for explicit and packed legacy curves.
-//!
-//! Muscle streams need semantic expansion into editor curves. Until that
-//! converter is implemented, they fail instead of producing an empty clip.
+//! Unity `.anim` output for explicit, packed and expanded standard muscle curves.
 use std::io::Write;
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +12,9 @@ use crate::{AssetKey, Session};
 use unity_rs_core::serialized::ObjectReference;
 
 const MAX_ANIMATION_BYTES: u64 = 64 * 1024 * 1024;
+
+#[path = "animation_expand.rs"]
+mod expand;
 
 enum Node {
     Map(Vec<(&'static str, Node)>),
@@ -40,14 +40,14 @@ impl Node {
 
 pub(crate) fn read_animation_yaml(session: &Session, key: AssetKey) -> Result<Vec<u8>> {
     let object = session.object(key)?;
-    let clip = object.read_animation_clip(AnimationClipReadLimits {
+    let mut clip = object.read_animation_clip(AnimationClipReadLimits {
         maximum_object_bytes: MAX_ANIMATION_BYTES,
         maximum_total_keyframes: 200_000,
         maximum_total_packed_bytes: 16 * 1024 * 1024,
         maximum_total_allocation_bytes: 128 * 1024 * 1024,
         ..AnimationClipReadLimits::default()
     })?;
-    reject_unexpanded_streams(&clip)?;
+    expand::expand(session, key, &mut clip)?;
     let version = session.studio.collection().serialized_files()[key.file_index]
         .file
         .unity_version
@@ -59,35 +59,6 @@ pub(crate) fn read_animation_yaml(session: &Session, key: AssetKey) -> Result<Ve
     )?;
     write_node(&node, 2, &mut output)?;
     Ok(output.into_inner())
-}
-
-fn reject_unexpanded_streams(clip: &AnimationClip) -> Result<()> {
-    if clip
-        .streaming_info
-        .as_ref()
-        .is_some_and(|info| info.size != 0)
-    {
-        bail!("standalone .anim export does not yet expand streamed animation payloads");
-    }
-    if let Some(muscle) = &clip.muscle_clip {
-        let data = &muscle.clip;
-        if data.streamed.data.count != 0
-            || data.streamed.curve_count != 0
-            || data.dense.frame_count != 0
-            || data.dense.curve_count != 0
-            || data.dense.samples.count != 0
-            || data.constant.values.count != 0
-            || data
-                .acl
-                .as_ref()
-                .is_some_and(|acl| acl.tracks.byte_length != 0)
-        {
-            bail!(
-                "standalone .anim export does not yet expand compressed muscle/dense/streamed/ACL curves; use animated FBX for supported model tracks or raw/JSON export"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn clip_node(clip: &AnimationClip, version: (u32, u32, u32)) -> Result<Node> {
@@ -318,7 +289,9 @@ fn curve<T>(
             ("inSlope", convert(&key.in_slope)),
             ("outSlope", convert(&key.out_slope)),
         ];
-        if let Some(weighted) = key.weighted_mode {
+        if let Some(weighted) = key.weighted_mode
+            && version.0 >= 2018
+        {
             fields.push(("weightedMode", Node::Int(i64::from(weighted))));
             fields.push((
                 "inWeight",

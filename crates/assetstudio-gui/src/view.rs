@@ -180,12 +180,17 @@ pub fn byte_size(bytes: u64) -> String {
 pub struct MeshPreview {
     vertices: Vec<[f32; 3]>,
     triangles: Vec<[usize; 3]>,
+    source_normals: Option<Vec<[f32; 3]>>,
+    calculated_normals: Vec<[f32; 3]>,
+    colors: Option<Vec<[f32; 4]>>,
     pub original_triangles: usize,
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
     pub pan: [f32; 2],
     pub mode: MeshMode,
+    pub shading: MeshShading,
+    previous_normal_shading: MeshShading,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,13 +200,71 @@ pub enum MeshMode {
     Combined,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeshShading {
+    #[default]
+    Flat,
+    CalculatedNormals,
+    SourceNormals,
+    VertexColors,
+}
+
+impl MeshShading {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "Flat",
+            Self::CalculatedNormals => "Calculated normals",
+            Self::SourceNormals => "Source normals",
+            Self::VertexColors => "Vertex colors",
+        }
+    }
+
+    pub fn preference(self) -> &'static str {
+        match self {
+            Self::Flat => "Flat",
+            Self::CalculatedNormals => "CalculatedNormals",
+            Self::SourceNormals => "SourceNormals",
+            Self::VertexColors => "VertexColors",
+        }
+    }
+
+    pub fn from_preference(value: &str) -> Result<Self, String> {
+        match value {
+            "Flat" => Ok(Self::Flat),
+            "CalculatedNormals" => Ok(Self::CalculatedNormals),
+            "SourceNormals" => Ok(Self::SourceNormals),
+            "VertexColors" => Ok(Self::VertexColors),
+            _ => Err("Saved mesh shading mode is unknown.".to_owned()),
+        }
+    }
+}
+
 impl MeshPreview {
     pub fn new(vertices: Vec<[f32; 3]>, indices: Vec<u32>) -> Result<Self, String> {
+        Self::with_attributes(vertices, indices, None, None)
+    }
+
+    pub fn with_attributes(
+        vertices: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+        source_normals: Option<Vec<[f32; 3]>>,
+        colors: Option<Vec<[f32; 4]>>,
+    ) -> Result<Self, String> {
         if vertices.is_empty() {
             return Err("This mesh has no vertices.".to_owned());
         }
+        if vertices.len() > 100_000 || indices.len() > 300_000 {
+            return Err("The mesh exceeds the preview detail limit.".to_owned());
+        }
         if !indices.len().is_multiple_of(3) {
             return Err("The mesh triangle index count is invalid.".to_owned());
+        }
+        if source_normals.as_ref().is_some_and(|values| {
+            values.len() != vertices.len() || values.iter().flatten().any(|v| !v.is_finite())
+        }) || colors.as_ref().is_some_and(|values| {
+            values.len() != vertices.len() || values.iter().flatten().any(|v| !v.is_finite())
+        }) {
+            return Err("Mesh source attributes are incomplete or non-finite.".to_owned());
         }
         let mut minimum = [f64::INFINITY; 3];
         let mut maximum = [f64::NEG_INFINITY; 3];
@@ -241,6 +304,9 @@ impl MeshPreview {
         {
             return Err("The mesh coordinates cannot be displayed at this scale.".to_owned());
         }
+        // Average unit face normals across the complete bounded source mesh.
+        // Sampling first would change lighting when a preview reduces detail.
+        let calculated_normals = calculated_normals(&vertices, &indices)?;
         let original_triangles = indices.len() / 3;
         // Spread the preview over the complete mesh, rather than truncating one end.
         let stride = original_triangles.div_ceil(10_000).max(1);
@@ -260,12 +326,17 @@ impl MeshPreview {
         Ok(Self {
             vertices,
             triangles,
+            source_normals,
+            calculated_normals,
+            colors,
             original_triangles,
             yaw: -0.5,
             pitch: 0.25,
             zoom: 1.0,
             pan: [0.0; 2],
             mode: MeshMode::Shaded,
+            shading: MeshShading::Flat,
+            previous_normal_shading: MeshShading::Flat,
         })
     }
 
@@ -277,20 +348,96 @@ impl MeshPreview {
         self.triangles.len() < self.original_triangles
     }
 
+    pub fn supports_shading(&self, mode: MeshShading) -> bool {
+        match mode {
+            MeshShading::Flat | MeshShading::CalculatedNormals => true,
+            MeshShading::SourceNormals => self.source_normals.is_some(),
+            MeshShading::VertexColors => self.colors.is_some(),
+        }
+    }
+
+    pub fn set_shading(&mut self, mode: MeshShading) -> bool {
+        if !self.supports_shading(mode) {
+            return false;
+        }
+        self.shading = mode;
+        if mode != MeshShading::VertexColors {
+            self.previous_normal_shading = mode;
+        }
+        true
+    }
+
+    pub fn cycle_wireframe(&mut self) {
+        self.mode = match self.mode {
+            MeshMode::Shaded => MeshMode::Wireframe,
+            MeshMode::Wireframe => MeshMode::Combined,
+            MeshMode::Combined => MeshMode::Shaded,
+        };
+    }
+
+    pub fn toggle_vertex_colors(&mut self) -> bool {
+        self.set_shading(if self.shading == MeshShading::VertexColors {
+            self.previous_normal_shading
+        } else {
+            MeshShading::VertexColors
+        })
+    }
+
+    pub fn toggle_normals(&mut self) -> bool {
+        let next = if self.previous_normal_shading == MeshShading::SourceNormals {
+            MeshShading::CalculatedNormals
+        } else {
+            MeshShading::SourceNormals
+        };
+        if !self.supports_shading(next) {
+            return false;
+        }
+        self.previous_normal_shading = next;
+        if self.shading != MeshShading::VertexColors {
+            self.shading = next;
+        }
+        true
+    }
+
     pub fn faces(
         &self,
         rect: eframe::egui::Rect,
     ) -> Result<Vec<crate::preview_geometry::ProjectedFace>, String> {
-        crate::preview_geometry::project_faces(
+        let camera = crate::preview_geometry::MeshCamera {
+            yaw: self.yaw,
+            pitch: self.pitch,
+            zoom: self.zoom,
+            pan: self.pan,
+        };
+        if self.shading == MeshShading::Flat {
+            return crate::preview_geometry::project_faces(
+                &self.vertices,
+                &self.triangles,
+                rect,
+                camera,
+            );
+        }
+        if !self.supports_shading(self.shading) {
+            return Err("This mesh has no source data for the selected shading mode.".to_owned());
+        }
+        let attributes = crate::preview_geometry::MeshAttributes {
+            normals: match self.shading {
+                MeshShading::CalculatedNormals => Some(self.calculated_normals.as_slice()),
+                MeshShading::SourceNormals => self.source_normals.as_deref(),
+                _ => None,
+            },
+            colors: if self.shading == MeshShading::VertexColors {
+                self.colors.as_deref()
+            } else {
+                None
+            },
+        };
+        crate::preview_geometry::project_faces_with_attributes(
             &self.vertices,
             &self.triangles,
             rect,
-            crate::preview_geometry::MeshCamera {
-                yaw: self.yaw,
-                pitch: self.pitch,
-                zoom: self.zoom,
-                pan: self.pan,
-            },
+            camera,
+            attributes,
         )
     }
 
@@ -300,6 +447,47 @@ impl MeshPreview {
         self.zoom = 1.0;
         self.pan = [0.0; 2];
     }
+}
+
+fn calculated_normals(vertices: &[[f32; 3]], indices: &[u32]) -> Result<Vec<[f32; 3]>, String> {
+    let mut sums = Vec::new();
+    sums.try_reserve_exact(vertices.len())
+        .map_err(|_| "Cannot allocate calculated preview normals.".to_owned())?;
+    sums.resize(vertices.len(), [0_f64; 3]);
+    for triangle in indices.as_chunks::<3>().0 {
+        let a = vertices[triangle[0] as usize];
+        let b = vertices[triangle[1] as usize];
+        let c = vertices[triangle[2] as usize];
+        let u = std::array::from_fn::<_, 3, _>(|axis| f64::from(b[axis]) - f64::from(a[axis]));
+        let v = std::array::from_fn::<_, 3, _>(|axis| f64::from(c[axis]) - f64::from(a[axis]));
+        let normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let length = normal.iter().map(|n| n * n).sum::<f64>().sqrt();
+        if length == 0.0 {
+            continue;
+        }
+        for &index in triangle {
+            for (value, normal) in sums[index as usize].iter_mut().zip(normal) {
+                *value += normal / length;
+            }
+        }
+    }
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(vertices.len())
+        .map_err(|_| "Cannot allocate calculated preview normals.".to_owned())?;
+    for sum in sums {
+        let length = sum.iter().map(|n| n * n).sum::<f64>().sqrt();
+        result.push(if length > 0.0 {
+            sum.map(|n| (n / length) as f32)
+        } else {
+            [0.0, 1.0, 0.0]
+        });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -458,5 +646,73 @@ mod tests {
                 .flat_map(|face| face.points)
                 .all(|point| point.x.is_finite() && point.y.is_finite())
         );
+    }
+
+    #[test]
+    fn source_modes_require_real_complete_channels_and_preserve_keyboard_state() {
+        let vertices = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let mut plain = MeshPreview::new(vertices.clone(), vec![0, 1, 2]).unwrap();
+        assert!(!plain.set_shading(MeshShading::SourceNormals));
+        assert!(!plain.set_shading(MeshShading::VertexColors));
+        assert_eq!(plain.shading, MeshShading::Flat);
+        assert!(plain.set_shading(MeshShading::CalculatedNormals));
+        let mut colored = MeshPreview::with_attributes(
+            vertices,
+            vec![0, 1, 2],
+            Some(vec![[0.0, 0.0, -1.0]; 3]),
+            Some(vec![[0.2, 0.4, 0.6, 1.0]; 3]),
+        )
+        .unwrap();
+        assert!(colored.set_shading(MeshShading::SourceNormals));
+        assert!(colored.toggle_vertex_colors());
+        assert_eq!(colored.shading, MeshShading::VertexColors);
+        assert!(colored.toggle_normals());
+        assert_eq!(colored.shading, MeshShading::VertexColors);
+        assert!(colored.toggle_vertex_colors());
+        assert_eq!(colored.shading, MeshShading::CalculatedNormals);
+        colored.cycle_wireframe();
+        assert!(colored.mode == MeshMode::Wireframe);
+        colored.cycle_wireframe();
+        assert!(colored.mode == MeshMode::Combined);
+        colored.cycle_wireframe();
+        assert!(colored.mode == MeshMode::Shaded);
+    }
+
+    #[test]
+    fn calculated_normals_average_complete_triangle_neighborhood_and_ignore_degeneracy() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 2.0, 2.0],
+        ];
+        let result = calculated_normals(&vertices, &[0, 1, 2, 0, 3, 1, 0, 0, 0]).unwrap();
+        let expected = std::f32::consts::FRAC_1_SQRT_2;
+        for index in [0, 1] {
+            assert!((result[index][1] - expected).abs() < 1e-6);
+            assert!((result[index][2] - expected).abs() < 1e-6);
+        }
+        assert_eq!(result[2], [0.0, 0.0, 1.0]);
+        assert_eq!(result[3], [0.0, 1.0, 0.0]);
+        assert_eq!(result[4], [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn malformed_attributes_and_excessive_preview_work_fail_before_rendering() {
+        let vertices = vec![[0.0; 3]; 3];
+        for (normals, colors) in [
+            (Some(vec![[0.0; 3]; 2]), None),
+            (Some(vec![[f32::NAN; 3]; 3]), None),
+            (None, Some(vec![[f32::INFINITY; 4]; 3])),
+            (None, Some(vec![[0.0; 4]; 2])),
+        ] {
+            assert!(
+                MeshPreview::with_attributes(vertices.clone(), vec![0, 1, 2], normals, colors)
+                    .is_err()
+            );
+        }
+        assert!(MeshPreview::new(vec![[0.0; 3]; 100_001], Vec::new()).is_err());
+        assert!(MeshPreview::new(vertices, vec![0; 300_003]).is_err());
     }
 }

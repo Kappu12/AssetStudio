@@ -28,6 +28,8 @@ VENDORED_LICENSES = {
     "licenses/managed-schema-templates/LICENSE": "packaging/licenses/managed-schema-templates/LICENSE",
 }
 BACKEND_DOCUMENTS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.txt", "FSB_VORBIS_NOTICE.md")
+BACKEND_LOCAL_DOCUMENTS = ("ASSETSTUDIO_PATCHES.md",)
+BACKEND_PATH = "vendor/unity-rs-core"
 SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z")
 # Imported Windows components are supplied by Windows 10/11. Graphics and audio
 # drivers may load their own modules dynamically through these OS interfaces.
@@ -92,23 +94,86 @@ def backend_directory(metadata: dict) -> Path:
     return Path(matches[0]["manifest_path"]).parent
 
 
+def check_vendored_backend_config(root: Path = ROOT) -> dict[str, str]:
+    """Keep backend tests in the workspace and preserve an explicit upstream pin."""
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    workspace = manifest.get("workspace", {})
+    if BACKEND_PATH not in workspace.get("members", ()) or BACKEND_PATH in workspace.get("exclude", ()):
+        raise ValueError("Vendored unity-rs-core must remain an explicit workspace member so its tests run")
+    dependency = workspace.get("dependencies", {}).get("unity_rs_core", {})
+    if not isinstance(dependency, dict) or dependency.get("package") != "unity-rs-core":
+        raise ValueError("Expected the named unity_rs_core workspace dependency")
+    upstream = dependency.get("git", "")
+    revision = dependency.get("rev", "")
+    if upstream != "https://github.com/seiunx-dev/unity-rs" or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Vendored backend requires its canonical upstream and exact 40-character revision")
+    patch = manifest.get("patch", {}).get(upstream, {}).get("unity-rs-core", {})
+    if not isinstance(patch, dict) or patch.get("path") != BACKEND_PATH:
+        raise ValueError("Cargo must patch the pinned backend with the reviewed vendored source")
+    return {"repository": upstream, "revision": revision}
+
+
+def backend_provenance(package: dict, root: Path) -> dict:
+    """Identify the actual compiled local reader, including binary decoder tables."""
+    upstream = check_vendored_backend_config(root)
+    backend = root / BACKEND_PATH
+    if package.get("source") is not None or Path(package["manifest_path"]).resolve() != (backend / "Cargo.toml").resolve():
+        raise ValueError("Cargo metadata must select the local vendored unity-rs-core source")
+    for name in BACKEND_LOCAL_DOCUMENTS:
+        require_file(backend / name)
+    require_file(backend / "Cargo.toml")
+    if (backend / "src").is_symlink() or not (backend / "src").is_dir():
+        raise ValueError("Vendored backend source must be a regular directory")
+    files = [backend / "Cargo.toml"]
+    for path in (backend / "src").rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"Vendored backend source must not contain symbolic links: {path}")
+        if path.is_file():
+            files.append(path)
+        if len(files) > 10_000:
+            raise ValueError("Vendored backend source inventory exceeds 10,000 files")
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for path in sorted(files):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Vendored backend source is not a regular file: {path}")
+        total_bytes += path.stat().st_size
+        if total_bytes > 512 * 1024 * 1024:
+            raise ValueError("Vendored backend source inventory exceeds 512 MiB")
+        name = path.relative_to(backend).as_posix().encode("utf-8")
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(bytes.fromhex(sha256(path)))
+    return {
+        "source": f"vendored+{upstream['repository']}#{upstream['revision']}",
+        "upstream": upstream,
+        "source_tree_sha256": digest.hexdigest(),
+        "source_tree_files": len(files),
+        "source_tree_bytes": total_bytes,
+        "source_tree_scope": "Cargo.toml and every file under src/, with path-length/path/SHA256 framing",
+        "local_modifications": "licenses/unity-rs-core/ASSETSTUDIO_PATCHES.md",
+    }
+
+
 def require_file(path: Path) -> None:
     if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
         raise ValueError(f"Missing, empty, or symbolic-link package input: {path}")
 
 
-def copy_dependency_licenses(metadata: dict, stage: Path) -> list[dict]:
+def copy_dependency_licenses(metadata: dict, stage: Path, root: Path = ROOT) -> list[dict]:
     """Retain the legal files supplied in every external Cargo package."""
-    fallback_root = ROOT / "packaging" / "licenses"
+    fallback_root = root / "packaging" / "licenses"
     fallback_manifest = fallback_root / "fallbacks.json"
     fallbacks = json.loads(fallback_manifest.read_text(encoding="utf-8")) if fallback_manifest.is_file() else {}
     inventory = []
     for package in metadata["packages"]:
-        if not package.get("source"):
+        is_backend = package["name"] == "unity-rs-core"
+        if not package.get("source") and not is_backend:
             continue
+        provenance = backend_provenance(package, root) if is_backend else {"source": package["source"]}
         package_root = Path(package["manifest_path"]).parent
         identity = package["name"] + "-" + package["version"]
-        source_suffix = hashlib.sha256(package["source"].encode("utf-8")).hexdigest()[:8]
+        source_suffix = hashlib.sha256(provenance["source"].encode("utf-8")).hexdigest()[:8]
         destination = stage / "licenses" / "dependencies" / f"{identity}-{source_suffix}"
         legal_files = set()
         for entry in package_root.rglob("*"):
@@ -148,7 +213,7 @@ def copy_dependency_licenses(metadata: dict, stage: Path) -> list[dict]:
             raise ValueError(f"No redistribution legal files found for {identity}; add an audited upstream fallback")
         inventory.append({
             "name": package["name"], "version": package["version"],
-            "license": package.get("license"), "source": package["source"],
+            "license": package.get("license"), **provenance,
             "license_files": copied,
             "fallback_sources": fallback_sources,
         })
@@ -280,7 +345,7 @@ def inspect_zip(path: Path, expected_version: str) -> None:
         required = set(BINARIES + DOCUMENTS + ("package-manifest.json",))
         required.update(PACKAGE_RESOURCES)
         required.update(VENDORED_LICENSES)
-        required.update("licenses/unity-rs-core/" + name for name in BACKEND_DOCUMENTS)
+        required.update("licenses/unity-rs-core/" + name for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS)
         if not required.issubset(names):
             raise ValueError(f"ZIP is missing required files: {sorted(required - set(names))}")
         forbidden_suffixes = (".dll", ".pdb", ".cs", ".csproj", ".cpp", ".lib", ".sln")
@@ -317,7 +382,9 @@ def make_package(
         require_file(root / source)
     metadata = metadata if metadata is not None else cargo_metadata(root)
     backend = backend_directory(metadata)
-    for name in BACKEND_DOCUMENTS:
+    backend_package = next(package for package in metadata["packages"] if package["name"] == "unity-rs-core")
+    backend_provenance(backend_package, root)
+    for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS:
         require_file(backend / name)
     output_dir.mkdir(parents=True, exist_ok=True)
     zip_path = output_dir / f"AssetStudio-win-x64-v{version}.zip"
@@ -336,7 +403,7 @@ def make_package(
             shutil.copy2(root / source, target)
         licenses = stage / "licenses" / "unity-rs-core"
         licenses.mkdir(parents=True)
-        for name in BACKEND_DOCUMENTS:
+        for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS:
             shutil.copy2(backend / name, licenses / name)
         for name in (
             "docs/rust-rewrite.md", "docs/feature-parity.md",
@@ -350,7 +417,7 @@ def make_package(
                 destination = stage / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(document, destination)
-        dependencies = copy_dependency_licenses(metadata, stage)
+        dependencies = copy_dependency_licenses(metadata, stage, root)
         (stage / "dependency-inventory.json").write_text(
             json.dumps(dependencies, indent=2) + "\n", encoding="utf-8", newline="\n",
         )

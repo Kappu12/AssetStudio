@@ -11,9 +11,11 @@ The managed/C++ implementation at commit
 
 ## Rust Unity backend
 
-The Rust application depends on `unity-rs-core` from
-<https://github.com/seiunx-dev/unity-rs>, pinned to commit
-`b3e509ed09fe6ff3a897d04ddb75eb5214482265`.
+The Rust application vendors `unity-rs-core` from
+<https://github.com/seiunx-dev/unity-rs>, based on commit
+`b3e509ed09fe6ff3a897d04ddb75eb5214482265` under
+`vendor/unity-rs-core`. Its local compatibility changes are recorded in
+`ASSETSTUDIO_PATCHES.md`; the source is compiled and tested as a workspace member.
 This MIT-licensed dependency provides Unity format parsing, decoding, and model
 export. It is an existing independent Rust implementation, not code newly
 authored in this rewrite.
@@ -21,8 +23,12 @@ authored in this rewrite.
 Its license credits Radu (2016), Perfare (2016–2022), and aelurum (2021–2025).
 Its format research credits AssetStudio by Perfare, AssetStudioMod by aelurum,
 UnityPy, and vgmstream. Its vendored decoders have their own retained notices.
-The release packager includes the exact pinned backend's LICENSE,
-THIRD_PARTY_NOTICES.md, and THIRD_PARTY_LICENSES.txt alongside this notice.
+The release packager retains the upstream LICENSE, THIRD_PARTY_NOTICES.md,
+THIRD_PARTY_LICENSES.txt and FSB_VORBIS_NOTICE.md unchanged alongside this notice,
+and includes the local patch record. The dependency inventory names the upstream
+revision and hashes the exact local Cargo.toml and runtime source tree, including
+binary decoder tables; the original upstream revision is not presented as an
+unmodified copy of the patched reader.
 
 ## Rust dependencies
 

@@ -1,0 +1,91 @@
+{
+  "baseline": "94318fa4eecb79190330da933bbc3d7de49055ed",
+  "oracle": "Exact original AES.cs, Mr0kUtils.cs, XORShift128.cs, CryptoHelper.cs compiled by Roslyn 4.11.0 on .NET8.0.25",
+  "input": "byte[i] = unchecked((byte)(i*37+11)); bytes[0..4] = ASCII mr0k",
+  "sources": {
+    "AES.cs": "626cdcedf9636ef9b7be13081bd7d3a6c7b68e5125b41c10001732b18ca18612",
+    "Mr0kUtils.cs": "660d5f44a0d919f6a6ca9285cc0851e5f35e6cce70a09b9d5c63241f17a34eb3",
+    "XORShift128.cs": "bf589b9c81585d8681fe3106757a4591f8ebe1d339861c2cc74304f3a05ffb09",
+    "CryptoHelper.cs": "15232f584df24f94c716b54ef47808b28ef19e3b1d316d4abdb31556a787d113",
+    "LZ4.cs": "61179ef76436e9387db7a9c04359f870584689c897abab6f36ba9c08c42f897b",
+    "LZ4Lit.cs": "54155033199779c9f86a6e586d1b95199b4c97d3640d804c0dae1e42018e3e28",
+    "ImportHelper.cs": "035e818fdb159e54d1407ba53c3b0c776f78f2dd3534068a7c9a6dde9b756b2a"
+  },
+  "outputs": [
+    {
+      "file": "BH3PrePre-10000.bin",
+      "sha256": "3d94da72ca3feba501b5e5f7ecb5d14d15a1a8a6f493afb81d9a2f959d598c1b",
+      "bytes": 9980
+    },
+    {
+      "file": "BH3PrePre-148.bin",
+      "sha256": "7c420076eb2fd4b549d469d754a917f515b8f4e0baca1ceffefac653bce725c1",
+      "bytes": 128
+    },
+    {
+      "file": "BH3PrePre-276.bin",
+      "sha256": "a9896d61cab70f5becdaa227f1aeca09b2c019754fbbe88f14c1450a4c198689",
+      "bytes": 256
+    },
+    {
+      "file": "BH3PrePre-4096.bin",
+      "sha256": "2b1ce505f4a117ace4dd4d780ef75919fc0774debbe3168c37faf40947621215",
+      "bytes": 4076
+    },
+    {
+      "file": "BH3PrePre-literal-payload.bin",
+      "sha256": "e39909efacbe1018ca2df55aaa3dcdae5f4a81d085a0a4f1c372486f8d2c8680",
+      "bytes": 4059
+    },
+    {
+      "file": "BH3PrePre-literal.mr0k",
+      "sha256": "1d1e7d7283aba440bf85a04f99fa8620c86c25e290359bffdf81dc9714e9502c",
+      "bytes": 4096
+    },
+    {
+      "file": "LZ4Lit-reference.bin",
+      "sha256": "454a81d7a32b668cb8fb6fc8e0a2c6fccd085eb2131b5546d6f926aca0f8368a",
+      "bytes": 50
+    },
+    {
+      "file": "LZ4Lit-reference.lit",
+      "sha256": "ce59053e404fd2a9390e7bcd47a1afcb0ec2faf4dff903d89a3bb35ab2771328",
+      "bytes": 34
+    },
+    {
+      "file": "LnD-reference.bin",
+      "sha256": "9d5f29d921298bbfb82850893d463d39af605cc9ebee7a947a2a10102855506e",
+      "bytes": 256
+    },
+    {
+      "file": "LnD-reference.encrypted",
+      "sha256": "ecfff101ce501ca27c432dfad3f6a1c0891822484bea1a5a4abc1024d7526d8d",
+      "bytes": 256
+    },
+    {
+      "file": "TOT-10000.bin",
+      "sha256": "6a7c12a81485abc9f7709a1a3475b49956fa1bede85c2a0725ac8eeff46d51f4",
+      "bytes": 9980
+    },
+    {
+      "file": "TOT-3092.bin",
+      "sha256": "eabaacd95a1ff540115bc3c624ceb32f6296cae7fcd4fcdac46c29417ca4154f",
+      "bytes": 3072
+    },
+    {
+      "file": "TOT-4096.bin",
+      "sha256": "54007e446499869ccbb95fb128576f3f2a4080527d7734aa13cf79f6524612cb",
+      "bytes": 4076
+    },
+    {
+      "file": "TOT-literal-payload.bin",
+      "sha256": "5a5d0a1ea12351de1e5fd3e4c72bc2a2f7d5c96a3b251382b8770b621ef779c0",
+      "bytes": 4059
+    },
+    {
+      "file": "TOT-literal.mr0k",
+      "sha256": "6cdb51ff9912eb634fcaf87e5225cdef7a54f0e5a3dfba4977d865244715c561",
+      "bytes": 4096
+    }
+  ]
+}

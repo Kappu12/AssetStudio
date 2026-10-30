@@ -24,10 +24,6 @@ pub fn load() -> Result<Option<Value>, String> {
     load_from(&settings_path()?)
 }
 
-pub fn save(value: &Value) -> Result<(), String> {
-    save_to(&settings_path()?, value)
-}
-
 pub fn settings_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     let root = std::env::var_os("APPDATA")
@@ -102,7 +98,7 @@ impl Write for Limited<'_> {
     }
 }
 
-fn save_to(path: &Path, value: &Value) -> Result<(), String> {
+pub(crate) fn save_to(path: &Path, value: &Value) -> Result<(), String> {
     if !value.is_object() {
         return Err("Settings must be an object.".to_owned());
     }

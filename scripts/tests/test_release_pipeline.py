@@ -19,7 +19,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from check_workflow_policy import ROOT as SOURCE_ROOT, check_policy
-from package_release import BACKEND_DOCUMENTS, BINARIES, DOCUMENTS, PACKAGE_RESOURCES, VENDORED_LICENSES, inspect_zip, make_package, sha256, verify_tag, workspace_version
+from package_release import BACKEND_DOCUMENTS, BACKEND_LOCAL_DOCUMENTS, BACKEND_PATH, BINARIES, DOCUMENTS, PACKAGE_RESOURCES, VENDORED_LICENSES, inspect_zip, make_package, sha256, verify_tag, workspace_version
 from publish_release import guard_tag_push, publish
 
 
@@ -66,8 +66,11 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.build = self.root / "target" / "release"
         self.build.mkdir(parents=True)
-        self.backend = self.root / "backend"
-        self.backend.mkdir()
+        self.backend = self.root / BACKEND_PATH
+        self.backend.mkdir(parents=True)
+        (self.backend / "Cargo.toml").write_text('[package]\nname = "unity-rs-core"\nversion = "0.6.1"\n', encoding="utf-8")
+        (self.backend / "src").mkdir()
+        (self.backend / "src/lib.rs").write_text("pub fn fixture() {}\n", encoding="utf-8")
         self.codec = self.root / "codec"
         self.codec.mkdir()
         (self.codec / "LICENSE-MIT").write_text("Fixture codec MIT notice\n", encoding="utf-8")
@@ -84,17 +87,24 @@ class Fixture(unittest.TestCase):
             path = self.root / source
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("Fixture vendored source MIT notice\n", encoding="utf-8")
-        for name in BACKEND_DOCUMENTS:
+        for name in BACKEND_DOCUMENTS + BACKEND_LOCAL_DOCUMENTS:
             (self.backend / name).write_text(f"Backend legal document {name}\n", encoding="utf-8")
         self.metadata = {"packages": [
             {"name": "unity-rs-core", "version": "0.6.1", "manifest_path": str(self.backend / "Cargo.toml"),
-             "license": "MIT", "source": "git+https://github.com/seiunx-dev/unity-rs#fixture"},
+             "license": "MIT", "source": None},
             {"name": "fixture-codec", "version": "1.0.0", "manifest_path": str(self.codec / "Cargo.toml"),
              "license": "MIT OR Apache-2.0", "source": "registry+fixture"},
         ]}
 
     def set_version(self, value: str) -> None:
-        (self.root / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{value}"\n', encoding="utf-8")
+        (self.root / "Cargo.toml").write_text(
+            f'[workspace]\nmembers = ["{BACKEND_PATH}"]\n'
+            f'[workspace.package]\nversion = "{value}"\n'
+            '[workspace.dependencies]\nunity_rs_core = { package = "unity-rs-core", '
+            'git = "https://github.com/seiunx-dev/unity-rs", rev = "' + "a" * 40 + '" }\n'
+            '[patch."https://github.com/seiunx-dev/unity-rs"]\n'
+            f'unity-rs-core = {{ path = "{BACKEND_PATH}" }}\n', encoding="utf-8",
+        )
 
     def package(self) -> tuple[Path, Path]:
         return make_package(self.build, self.root / "dist", root=self.root, metadata=self.metadata)
@@ -184,6 +194,62 @@ class PackageTests(Fixture):
         (self.backend / "LICENSE").unlink()
         with self.assertRaisesRegex(ValueError, "package input"):
             self.package()
+
+    def test_vendored_reader_provenance_covers_local_code_and_binary_decoder_tables(self) -> None:
+        archive, _ = self.package()
+        with zipfile.ZipFile(archive) as package:
+            before = next(p for p in json.loads(package.read("dependency-inventory.json")) if p["name"] == "unity-rs-core")
+            self.assertEqual(before["source"], "vendored+https://github.com/seiunx-dev/unity-rs#" + "a" * 40)
+            self.assertEqual(before["upstream"]["revision"], "a" * 40)
+            self.assertEqual(before["source_tree_files"], 2)
+            self.assertEqual(package.read(before["local_modifications"]), b"Backend legal document ASSETSTUDIO_PATCHES.md\n")
+        (self.backend / "src/lib.rs").write_text("pub fn changed_fixture() {}\n", encoding="utf-8")
+        archive, _ = self.package()
+        with zipfile.ZipFile(archive) as package:
+            changed_code = next(p for p in json.loads(package.read("dependency-inventory.json")) if p["name"] == "unity-rs-core")
+        self.assertNotEqual(before["source_tree_sha256"], changed_code["source_tree_sha256"])
+        (self.backend / "src/decoder-table.bin").write_bytes(b"\x00\xff\x80\x01")
+        archive, _ = self.package()
+        with zipfile.ZipFile(archive) as package:
+            changed_table = next(p for p in json.loads(package.read("dependency-inventory.json")) if p["name"] == "unity-rs-core")
+            self.assertNotIn("src/decoder-table.bin", package.namelist())
+        self.assertEqual(changed_table["source_tree_files"], 3)
+        self.assertEqual(changed_table["upstream"], before["upstream"])
+        self.assertNotEqual(changed_code["source_tree_sha256"], changed_table["source_tree_sha256"])
+
+    def test_reader_cannot_drop_out_of_workspace_tests_or_select_a_different_source(self) -> None:
+        manifest = self.root / "Cargo.toml"
+        original = manifest.read_text(encoding="utf-8")
+        for changed in (
+            original.replace(f'members = ["{BACKEND_PATH}"]', 'members = []'),
+            original.replace(f'path = "{BACKEND_PATH}"', 'path = "other-reader"'),
+            original.replace("a" * 40, "main"),
+        ):
+            manifest.write_text(changed, encoding="utf-8")
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                self.package()
+            self.assertFalse((self.root / "dist").exists())
+
+    def test_metadata_cannot_substitute_an_unpatched_git_reader(self) -> None:
+        self.metadata["packages"][0]["source"] = "git+https://github.com/seiunx-dev/unity-rs#" + "a" * 40
+        with self.assertRaisesRegex(ValueError, "local vendored"):
+            self.package()
+        self.assertFalse((self.root / "dist").exists())
+
+    def test_missing_local_patch_record_prevents_package(self) -> None:
+        (self.backend / "ASSETSTUDIO_PATCHES.md").unlink()
+        with self.assertRaisesRegex(ValueError, "package input"):
+            self.package()
+
+    def test_symlink_source_cannot_enter_the_vendored_reader_digest(self) -> None:
+        source = self.backend / "src/linked.rs"
+        try:
+            source.symlink_to(self.codec / "LICENSE-MIT")
+        except OSError:
+            self.skipTest("Creating symbolic links is unavailable on this runner")
+        with self.assertRaisesRegex(ValueError, "symbolic links"):
+            self.package()
+        self.assertFalse((self.root / "dist").exists())
 
     def test_missing_bundled_key_registry_prevents_package(self) -> None:
         (self.root / PACKAGE_RESOURCES["Keys.json"]).unlink()

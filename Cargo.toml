@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/assetstudio-core", "crates/assetstudio-cli", "crates/assetstudio-gui"]
+members = ["crates/assetstudio-core", "crates/assetstudio-cli", "crates/assetstudio-gui", "vendor/unity-rs-core"]
 resolver = "3"
 
 [workspace.package]
@@ -26,3 +26,6 @@ unsafe_code = "forbid"
 lto = "thin"
 strip = true
 codegen-units = 1
+
+[patch."https://github.com/seiunx-dev/unity-rs"]
+unity-rs-core = { path = "vendor/unity-rs-core" }

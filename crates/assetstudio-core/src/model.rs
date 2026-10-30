@@ -5,14 +5,15 @@ use std::{
     path::Path,
 };
 
+use crate::model_options::{ModelExportOptions, apply_animation_options, apply_model_options};
 use crate::output::{SafeOutput, component};
 use crate::session::{MAX_EXPORT_FILE_BYTES, MAX_EXPORT_TOTAL_BYTES};
 use crate::{AssetKey, ModelFormat, OperationReport, Session};
 use anyhow::{Context, Result, bail};
 use unity_rs_core::{
     animation_graph::{AnimationGraphLimits, build_animation_graph},
-    fbx_ascii::write_model_ir_fbx_ascii_with_textures,
-    fbx_binary_scene::write_model_ir_fbx_binary_full,
+    fbx_ascii::write_model_ir_fbx_ascii_with_settings,
+    fbx_binary_scene::write_model_ir_fbx_binary_full_with_settings,
     image_export::ImageFormat as BackendImageFormat,
     model_animation::{ModelAnimationLimits, build_model_animations},
     model_ir::{ModelIr, ModelIrLimits, build_model_ir, build_model_ir_for_game_object},
@@ -20,21 +21,6 @@ use unity_rs_core::{
     scene_hierarchy::{SceneHierarchyLimits, SceneObjectKey},
     scene_textures::{SceneTextureLimits, SceneTextureSet},
 };
-
-/// Model conversion controls. Disabled paths are never decoded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModelExportOptions {
-    pub include_animations: bool,
-    pub include_textures: bool,
-}
-impl Default for ModelExportOptions {
-    fn default() -> Self {
-        Self {
-            include_animations: true,
-            include_textures: true,
-        }
-    }
-}
 
 struct ModelBudget {
     used: u64,
@@ -78,13 +64,26 @@ impl Session {
         maximum_total: u64,
         options: &ModelExportOptions,
     ) -> Result<OperationReport> {
+        options.validate()?;
         if roots.len() > 1_000_000 {
             bail!("model root count exceeds catalog limit");
         }
         let destination = SafeOutput::new(output)?;
-        let hierarchy = self
+        let mut hierarchy = self
             .studio
             .scene_hierarchy(SceneHierarchyLimits::default())?;
+        // Disabled materials must not require their binary layouts or texture
+        // dependencies to parse successfully during model construction.
+        if !options.include_materials {
+            for node in &mut hierarchy.nodes {
+                if let Some(renderer) = &mut node.mesh_renderer {
+                    renderer.materials.clear();
+                }
+                if let Some(renderer) = &mut node.skinned_mesh_renderer {
+                    renderer.materials.clear();
+                }
+            }
+        }
         let mut report = OperationReport::default();
         let mut budget = ModelBudget {
             used: 0,
@@ -170,12 +169,12 @@ impl Session {
         &self,
         destination: &SafeOutput,
         name: &str,
-        model: ModelIr,
+        mut model: ModelIr,
         format: ModelFormat,
         budget: &mut ModelBudget,
         report: &mut OperationReport,
     ) -> Result<()> {
-        crate::model_preview::ensure_no_static_batches(self.studio.collection(), &model)?;
+        apply_model_options(&mut model, &budget.options)?;
         if !model.nodes.iter().any(|node| {
             node.export_content
                 && node
@@ -259,23 +258,26 @@ impl Session {
                         &graph,
                         &mut animations,
                     )?;
+                    apply_animation_options(&mut animations, &model, &budget.options)?;
                     animations
                 } else {
                     unity_rs_core::model_animation::ModelAnimationSet::default()
                 };
                 if format == ModelFormat::FbxAscii {
-                    write_model_ir_fbx_ascii_with_textures(
+                    write_model_ir_fbx_ascii_with_settings(
                         &model,
                         &animations,
                         &textures,
+                        &budget.options.fbx,
                         &mut file,
                         model_budget,
                     )?;
                 } else {
-                    write_model_ir_fbx_binary_full(
+                    write_model_ir_fbx_binary_full_with_settings(
                         &model,
                         Some(&animations),
                         Some(&textures),
+                        &budget.options.fbx,
                         &mut file,
                         model_budget,
                     )?;

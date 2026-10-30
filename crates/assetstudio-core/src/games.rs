@@ -3,6 +3,7 @@
 //! A wrapper transform is not evidence that every asset layout in that game is
 //! supported. See `docs/game-compatibility.md` for the profile-by-profile gaps.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,10 @@ mod bundle;
 mod constants;
 #[path = "game_crypto.rs"]
 mod crypto;
+#[path = "game_mhy.rs"]
+mod mhy;
+#[path = "game_mr0k.rs"]
+mod mr0k;
 
 use constants::*;
 
@@ -25,13 +30,85 @@ const MAX_DIRECTORIES: usize = 16_384;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DIRECTORY_DEPTH: usize = 64;
 const MAX_GAME_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SPLIT_PARTS: usize = 10_000;
 
 pub type PreparedGameRegions = Option<Vec<(String, Region)>>;
 pub type GamePreparation = (PreparedGameRegions, Vec<String>);
 
+/// Shared across every selected path of one load/extraction operation. Failed
+/// decode attempts consume read work too; folder/multi-file selection cannot
+/// reset either the encoded-read or retained decoded-region allowance.
+pub struct GamePreparationBudget {
+    maximum: u64,
+    retained_bytes: u64,
+    materialized_input_bytes: u64,
+    sources: HashSet<(&'static str, PathBuf)>,
+    source_path_bytes: usize,
+    discovered_files: usize,
+    discovered_directories: usize,
+    discovered_entries: usize,
+    diagnostic_bytes: usize,
+}
+
+impl GamePreparationBudget {
+    pub fn new(maximum: u64) -> Result<Self> {
+        let maximum = maximum.min(MAX_GAME_BUFFER_BYTES);
+        ensure!(
+            maximum > 0,
+            limit("Game input byte budget must be positive")
+        );
+        Ok(Self {
+            maximum,
+            retained_bytes: 0,
+            materialized_input_bytes: 0,
+            sources: HashSet::new(),
+            source_path_bytes: 0,
+            discovered_files: 0,
+            discovered_directories: 0,
+            discovered_entries: 0,
+            diagnostic_bytes: 0,
+        })
+    }
+
+    fn visit_file(&mut self) -> Result<()> {
+        charge_discovery(
+            &mut self.discovered_files,
+            MAX_FILES,
+            "Game input contains too many files across the selected paths",
+        )
+    }
+
+    fn visit_directory(&mut self) -> Result<()> {
+        charge_discovery(
+            &mut self.discovered_directories,
+            MAX_DIRECTORIES,
+            "Game input contains too many directories across the selected paths",
+        )
+    }
+
+    fn visit_entry(&mut self) -> Result<()> {
+        charge_discovery(
+            &mut self.discovered_entries,
+            MAX_FILES + MAX_DIRECTORIES,
+            "Game input contains too many directory entries across the selected paths",
+        )
+    }
+}
+
+fn charge_discovery(counter: &mut usize, maximum: usize, description: &'static str) -> Result<()> {
+    *counter = counter.checked_add(1).with_context(|| limit(description))?;
+    ensure!(*counter <= maximum, limit(description));
+    Ok(())
+}
+
 const SUPPORTED: &[&str] = &[
     "Normal",
     "UnityCN",
+    "Naraka",
+    "TOT",
+    "BH3PrePre",
+    "ExAstris",
+    "LoveAndDeepspace",
     "OPFP",
     "NetEase",
     "PerpetualNovelty",
@@ -165,74 +242,119 @@ pub fn prepare_regions_with_policy(
     max_bytes: u64,
     continue_on_error: bool,
 ) -> Result<GamePreparation> {
+    prepare_regions_with_budget(
+        input,
+        profile,
+        &mut GamePreparationBudget::new(max_bytes)?,
+        continue_on_error,
+    )
+}
+
+pub fn prepare_regions_with_budget(
+    input: &Path,
+    profile: &str,
+    budget: &mut GamePreparationBudget,
+    continue_on_error: bool,
+) -> Result<GamePreparation> {
     let profile = canonical_profile(profile)?;
     if matches!(profile, "Normal" | "UnityCN") {
         return Ok((None, Vec::new()));
     }
-    let maximum = max_bytes.min(MAX_GAME_BUFFER_BYTES);
-    ensure!(maximum > 0, "Game input byte budget must be positive");
-    let files = collect_files(input)?;
+    let maximum = budget.maximum;
+    let files = collect_sources(input, budget)?;
     let mut regions = Vec::new();
-    regions.try_reserve(files.len())?;
-    let mut retained_bytes = 0_u64;
-    let mut materialized_input_bytes = 0_u64;
+    regions.try_reserve(files.len()).map_err(allocation_limit)?;
     let mut diagnostics = Vec::new();
-    let mut diagnostic_bytes = 0_usize;
     for file in files {
-        let path = file.to_string_lossy().into_owned();
-        ensure!(path.len() <= MAX_PATH_BYTES, "Game input path is too long");
+        let identity = (profile, file.logical_path.clone());
+        if budget.sources.contains(&identity) {
+            continue;
+        }
+        ensure!(
+            budget.sources.len() < MAX_FILES,
+            limit("Shared game source count exceeds file limit")
+        );
+        let path_bytes = budget
+            .source_path_bytes
+            .checked_add(file.logical_path.as_os_str().as_encoded_bytes().len())
+            .with_context(|| limit("Shared game path size overflow"))?;
+        ensure!(
+            path_bytes <= 256 * 1024 * 1024,
+            limit("Shared game source paths exceed byte limit")
+        );
+        let path = file.logical_path.to_string_lossy().into_owned();
+        ensure!(
+            path.len() <= MAX_PATH_BYTES,
+            limit("Game input path is too long")
+        );
         let remaining = maximum
-            .checked_sub(retained_bytes)
-            .context("Game input materialization accounting overflow")?;
+            .checked_sub(budget.retained_bytes)
+            .with_context(|| limit("Game input materialization accounting overflow"))?;
         let remaining_input = maximum
-            .checked_sub(materialized_input_bytes)
-            .context("Game input read accounting overflow")?;
+            .checked_sub(budget.materialized_input_bytes)
+            .with_context(|| limit("Game input read accounting overflow"))?;
         let available = remaining.min(remaining_input);
         let prepared = (|| -> Result<(Region, u64)> {
-            let source = Region::from_file(&file)?;
-            if is_companion_resource(&file) {
+            let source = file.open()?;
+            if is_companion_resource(&file.logical_path) {
                 return Ok((source, 0));
             }
             let mut prefix = [0_u8; 4096];
             let prefix_length = usize::try_from(source.len().min(prefix.len() as u64))?;
             source.read_exact_at(0, &mut prefix[..prefix_length])?;
             if looks_like_standard_input(&prefix[..prefix_length], source.len())
-                && !(force_standard_bundle_transform(profile) && prefix.starts_with(UNITY_FS))
+                && !transform_standard_container(profile, &prefix[..prefix_length])
             {
                 return Ok((source, 0));
             }
             if source.len() > available {
-                return Err(anyhow::Error::new(GameBudgetExceeded));
+                return Err(anyhow::Error::new(limit(
+                    "Game wrapper input exceeds the cumulative materialization byte budget",
+                )));
             }
             // Charge attempted reads before I/O or decoding. Otherwise a
             // continue-mode folder of malformed sparse files could repeat
             // the full byte budget indefinitely without retaining output.
-            materialized_input_bytes = materialized_input_bytes
+            budget.materialized_input_bytes = budget
+                .materialized_input_bytes
                 .checked_add(source.len())
-                .context("Game input read accounting overflow")?;
-            let data = source.read_to_vec(available)?;
+                .with_context(|| limit("Game input read accounting overflow"))?;
+            let length = usize::try_from(source.len())
+                .with_context(|| limit("Game input exceeds platform address space"))?;
+            let mut data = Vec::new();
+            data.try_reserve_exact(length).map_err(allocation_limit)?;
+            data.resize(length, 0);
+            source.read_exact_at(0, &mut data)?;
             // The per-file decoder receives the absolute file budget. Its
             // result is committed to the shared budget outside this recovery
             // scope, so expansion cannot turn a shared-limit failure into a
             // silently skipped input.
-            let decoded = decode_container_at(&data, profile, &file, maximum)
-                .with_context(|| format!("Could not decode game wrapper {file:?}"))?;
+            let decoded = decode_container_at(&data, profile, &file.logical_path, maximum)
+                .with_context(|| {
+                    format!("Could not decode game wrapper {:?}", file.logical_path)
+                })?;
             let length = decoded.len() as u64;
             Ok((Region::from_bytes(decoded), length))
         })();
         match prepared {
             Ok((region, length)) => {
-                retained_bytes = retained_bytes
+                budget.retained_bytes = budget
+                    .retained_bytes
                     .checked_add(length)
-                    .context("Game wrapper materialization accounting overflow")?;
+                    .with_context(|| limit("Game wrapper materialization accounting overflow"))?;
                 ensure!(
-                    retained_bytes <= maximum,
-                    "Decoded game wrappers exceed the {maximum} byte cumulative materialization budget"
+                    budget.retained_bytes <= maximum,
+                    limit(format!(
+                        "Decoded game wrappers exceed the {maximum} byte cumulative materialization budget"
+                    ))
                 );
+                budget.sources.try_reserve(1).map_err(allocation_limit)?;
+                budget.sources.insert(identity);
+                budget.source_path_bytes = path_bytes;
                 regions.push((path, region));
             }
-            Err(error) if continue_on_error && !error.is::<GameBudgetExceeded>() => {
-                let mut message = format!("Skipped game input {file:?}: {error:#}");
+            Err(error) if continue_on_error && !is_preparation_limit(&error) => {
+                let mut message = format!("Skipped game input {:?}: {error:#}", file.logical_path);
                 if message.len() > 8192 {
                     let mut boundary = 8192;
                     while !message.is_char_boundary(boundary) {
@@ -240,14 +362,15 @@ pub fn prepare_regions_with_policy(
                     }
                     message.truncate(boundary);
                 }
-                diagnostic_bytes = diagnostic_bytes
+                budget.diagnostic_bytes = budget
+                    .diagnostic_bytes
                     .checked_add(message.len())
-                    .context("Game diagnostics accounting overflow")?;
+                    .with_context(|| limit("Game diagnostics accounting overflow"))?;
                 ensure!(
-                    diagnostic_bytes <= 16 * 1024 * 1024,
-                    "Game diagnostics exceed 16 MiB"
+                    budget.diagnostic_bytes <= 16 * 1024 * 1024,
+                    limit("Game diagnostics exceed 16 MiB")
                 );
-                diagnostics.try_reserve(1)?;
+                diagnostics.try_reserve(1).map_err(allocation_limit)?;
                 diagnostics.push(message);
             }
             Err(error) => return Err(error),
@@ -257,15 +380,32 @@ pub fn prepare_regions_with_policy(
 }
 
 #[derive(Debug)]
-struct GameBudgetExceeded;
+struct GameBudgetExceeded(String);
 
 impl std::fmt::Display for GameBudgetExceeded {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Game wrapper input exceeds the cumulative materialization byte budget")
+        formatter.write_str(&self.0)
     }
 }
 
 impl std::error::Error for GameBudgetExceeded {}
+
+fn limit(message: impl Into<String>) -> GameBudgetExceeded {
+    GameBudgetExceeded(message.into())
+}
+
+fn allocation_limit(error: std::collections::TryReserveError) -> GameBudgetExceeded {
+    limit(format!(
+        "Game preparation allocation limit exceeded: {error}"
+    ))
+}
+
+/// Resource limits remain fatal through both the preparation and Session
+/// continue-on-error policies. `anyhow` preserves this typed cause across
+/// context, so callers must classify the cause instead of matching text.
+pub(crate) fn is_preparation_limit(error: &anyhow::Error) -> bool {
+    error.is::<GameBudgetExceeded>()
+}
 
 /// Decodes a wrapper whose key does not depend on its filename. For
 /// filename-keyed formats use [`decode_container_at`].
@@ -284,18 +424,18 @@ pub fn decode_container_at(
     let profile = canonical_profile(profile)?;
     ensure!(
         path.as_os_str().as_encoded_bytes().len() <= MAX_PATH_BYTES,
-        "Game wrapper path exceeds {MAX_PATH_BYTES} bytes"
+        limit(format!("Game wrapper path exceeds {MAX_PATH_BYTES} bytes"))
     );
     let maximum = max_bytes.min(MAX_GAME_BUFFER_BYTES);
     ensure!(
         data.len() as u64 <= maximum,
-        "Game wrapper exceeds {maximum} byte budget"
+        limit(format!("Game wrapper exceeds {maximum} byte budget"))
     );
     if matches!(profile, "Normal" | "UnityCN") {
         return copy_bytes(data);
     }
     if looks_like_standard_input(data, data.len() as u64)
-        && !(force_standard_bundle_transform(profile) && data.starts_with(UNITY_FS))
+        && !transform_standard_container(profile, data)
     {
         return copy_bytes(data);
     }
@@ -303,6 +443,8 @@ pub fn decode_container_at(
         "FakeHeader" | "ShiningNikki" => strip_fake_header(data)?,
         "OPFP" => bundle::normalize(&strip_fake_header(data)?, profile, path, maximum)?,
         "NetEase" | "PerpetualNovelty" => bundle::normalize(data, profile, path, maximum)?,
+        "Naraka" | "TOT" | "BH3PrePre" | "ExAstris" => mhy::normalize(data, profile, maximum)?,
+        "LoveAndDeepspace" => mhy::normalize(&decode_love_and_deepspace(data)?, profile, maximum)?,
         "EnsembleStars" => decode_ensemble(data)?,
         "FantasyOfWind" => decode_fantasy(data)?,
         "HelixWaltz2" => decode_helix(data)?,
@@ -325,7 +467,9 @@ pub fn decode_container_at(
     };
     ensure!(
         output.len() as u64 <= maximum,
-        "Decoded game wrapper exceeds {maximum} byte budget"
+        limit(format!(
+            "Decoded game wrapper exceeds {maximum} byte budget"
+        ))
     );
     ensure!(
         looks_like_standard_input(&output, output.len() as u64),
@@ -344,12 +488,40 @@ fn force_standard_bundle_transform(profile: &str) -> bool {
             | "OPFP"
             | "NetEase"
             | "PerpetualNovelty"
+            | "Naraka"
+            | "TOT"
+            | "BH3PrePre"
+            | "ExAstris"
+            | "LoveAndDeepspace"
     )
+}
+
+fn transform_standard_container(profile: &str, data: &[u8]) -> bool {
+    if !force_standard_bundle_transform(profile) {
+        return false;
+    }
+    if data.starts_with(UNITY_FS) {
+        return true;
+    }
+    if matches!(profile, "Naraka" | "TOT" | "BH3PrePre" | "ExAstris") {
+        for signature in [b"UnityWeb\0".as_slice(), b"UnityRaw\0".as_slice()] {
+            if data.starts_with(signature)
+                && data
+                    .get(signature.len()..signature.len() + 4)
+                    .is_some_and(|bytes| bytes == 6u32.to_be_bytes())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn copy_bytes(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
-    output.try_reserve_exact(data.len())?;
+    output
+        .try_reserve_exact(data.len())
+        .map_err(allocation_limit)?;
     output.extend_from_slice(data);
     Ok(output)
 }
@@ -555,7 +727,7 @@ fn decode_dreamscape(data: &[u8], maximum: u64) -> Result<Vec<u8>> {
     let size = (u64::from(size_high) << 32) | u64::from(size_low);
     ensure!(
         size <= maximum,
-        "DreamscapeAlbireo decoded size exceeds byte budget"
+        limit("DreamscapeAlbireo decoded size exceeds byte budget")
     );
     let compressed_size_usize = usize::try_from(compressed_size)?;
     ensure!(
@@ -566,17 +738,19 @@ fn decode_dreamscape(data: &[u8], maximum: u64) -> Result<Vec<u8>> {
         .len()
         .checked_sub(28)
         .and_then(|n| n.checked_add(49))
-        .context("DreamscapeAlbireo output size overflow")?;
+        .with_context(|| limit("DreamscapeAlbireo output size overflow"))?;
     ensure!(
         output_size as u64 <= maximum,
-        "DreamscapeAlbireo output exceeds byte budget"
+        limit("DreamscapeAlbireo output exceeds byte budget")
     );
     ensure!(
         size == output_size as u64,
         "DreamscapeAlbireo declared bundle size does not match reconstructed bytes"
     );
     let mut output = Vec::new();
-    output.try_reserve_exact(output_size)?;
+    output
+        .try_reserve_exact(output_size)
+        .map_err(allocation_limit)?;
     output.extend_from_slice(UNITY_FS);
     output.extend_from_slice(&6_u32.to_be_bytes());
     output.extend_from_slice(b"5.x.x\0");
@@ -776,13 +950,29 @@ fn decode_school(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+fn decode_love_and_deepspace(data: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        data.len() >= 16,
+        "LoveAndDeepspace encrypted header is truncated"
+    );
+    const VECTOR: [u8; 4] = [0x35, 0x6b, 0x05, 0];
+    let mut key = [0_u8; 64];
+    for (index, &byte) in data[..16].iter().enumerate() {
+        let seed = byte ^ ORIGINAL_HEADER[index] ^ VECTOR[0];
+        for (group, vector) in VECTOR.iter().enumerate() {
+            key[group * 16 + index] = seed ^ vector;
+        }
+    }
+    xor_copy(data, &key)
+}
+
 /// Decodes the old GI_CB1 `mark` envelope. This standalone primitive is tested,
 /// but GI_CB1 is deliberately not advertised as a working profile: its custom
 /// serialized and renderer layouts have not yet been ported.
 pub fn decode_mark(data: &[u8], maximum: u64) -> Result<Vec<u8>> {
     ensure!(
         data.len() as u64 <= maximum.min(MAX_GAME_BUFFER_BYTES),
-        "Mark input exceeds byte budget"
+        limit("Mark input exceeds byte budget")
     );
     ensure!(data.starts_with(b"mark"), "Invalid mark wrapper signature");
     const BLOCK: usize = 0xa00;
@@ -790,7 +980,9 @@ pub fn decode_mark(data: &[u8], maximum: u64) -> Result<Vec<u8>> {
     const PADDING: usize = 4;
     const PADDED_BLOCK: usize = BLOCK + (BLOCK / CHUNK + 1) * PADDING;
     let mut output = Vec::new();
-    output.try_reserve_exact(data.len() - 4)?;
+    output
+        .try_reserve_exact(data.len() - 4)
+        .map_err(allocation_limit)?;
     let mut key_index = 0_usize;
     for block in data[4..].chunks(PADDED_BLOCK) {
         for chunk in block.chunks(CHUNK + PADDING) {
@@ -825,15 +1017,133 @@ fn is_companion_resource(path: &Path) -> bool {
         })
 }
 
-fn collect_files(input: &Path) -> Result<Vec<PathBuf>> {
+struct GameSource {
+    logical_path: PathBuf,
+    parts: Vec<(Option<usize>, PathBuf)>,
+}
+
+impl GameSource {
+    fn open(&self) -> Result<Region> {
+        let split = self.parts.first().is_some_and(|part| part.0.is_some());
+        if split {
+            ensure!(
+                self.parts.len() <= MAX_SPLIT_PARTS,
+                limit("Game split input has too many segments")
+            );
+        } else {
+            ensure!(
+                self.parts.len() == 1,
+                "Both a complete input and split segments exist for {:?}",
+                self.logical_path
+            );
+        }
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(self.parts.len())
+            .map_err(allocation_limit)?;
+        for (position, (index, path)) in self.parts.iter().enumerate() {
+            if split {
+                ensure!(
+                    *index == Some(position),
+                    "Game split input has duplicate or missing segment {position}: {:?}",
+                    self.logical_path
+                );
+            }
+            let metadata = fs::symlink_metadata(path)?;
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "Game split input is not a regular file: {path:?}"
+            );
+            regions.push(Region::from_file(path)?);
+        }
+        Region::concatenate(regions, u64::MAX).map_err(|error| {
+            limit(format!("Game split source region limit exceeded: {error}")).into()
+        })
+    }
+}
+
+fn split_base(path: &Path) -> Option<(PathBuf, usize)> {
+    let suffix = path.extension()?.to_str()?.strip_prefix("split")?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // Keep even a too-large index in the group, then report it through the
+    // ordinary per-input failure policy rather than interpreting it as a file.
+    let index = suffix.parse().unwrap_or(usize::MAX);
+    let stem = path.file_stem()?;
+    Some((path.with_file_name(stem), index))
+}
+
+fn collect_sources(input: &Path, budget: &mut GamePreparationBudget) -> Result<Vec<GameSource>> {
+    let mut files = collect_files(input, budget)?;
+    if input.is_file() && split_base(input).is_some() {
+        // Absolute lexical paths keep selected filename/path-derived keys,
+        // while ensuring read_dir's entries and the explicitly selected part
+        // have the same prefix even for a relative filename in the cwd.
+        let selected = if input.is_absolute() {
+            input.to_owned()
+        } else {
+            std::env::current_dir()?.join(input)
+        };
+        files[0] = selected.clone();
+        let (base, _) = split_base(&selected).context("Game split source name changed")?;
+        let parent = selected
+            .parent()
+            .context("Game split source has no parent")?;
+        budget.visit_directory()?;
+        for entry in fs::read_dir(parent)? {
+            budget.visit_entry()?;
+            let path = entry?.path();
+            if (path == base || split_base(&path).is_some_and(|(candidate, _)| candidate == base))
+                && path != selected
+            {
+                budget.visit_file()?;
+                files.try_reserve(1).map_err(allocation_limit)?;
+                files.push(path);
+            }
+        }
+    }
+    let mut grouped: BTreeMap<PathBuf, Vec<(Option<usize>, PathBuf)>> = BTreeMap::new();
+    for file in files {
+        ensure!(
+            file.as_os_str().as_encoded_bytes().len() <= MAX_PATH_BYTES,
+            limit("Game input path is too long")
+        );
+        let (logical, index) = match split_base(&file) {
+            Some((path, index)) => (path, Some(index)),
+            None => (file.clone(), None),
+        };
+        let parts = grouped.entry(logical).or_default();
+        parts.try_reserve(1).map_err(allocation_limit)?;
+        parts.push((index, file));
+    }
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(grouped.len())
+        .map_err(allocation_limit)?;
+    for (logical_path, mut parts) in grouped {
+        parts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        result.push(GameSource {
+            logical_path,
+            parts,
+        });
+    }
+    Ok(result)
+}
+
+fn collect_files(input: &Path, budget: &mut GamePreparationBudget) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut pending = vec![(input.to_owned(), 0_usize)];
-    let mut directories = 0_usize;
-    let mut entries = 0_usize;
     while let Some((path, depth)) = pending.pop() {
         ensure!(
+            path.as_os_str().as_encoded_bytes().len() <= MAX_PATH_BYTES,
+            limit("Game input path is too long")
+        );
+        ensure!(
             depth <= MAX_DIRECTORY_DEPTH,
-            "Game input directory depth exceeds {MAX_DIRECTORY_DEPTH}"
+            limit(format!(
+                "Game input directory depth exceeds {MAX_DIRECTORY_DEPTH}"
+            ))
         );
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("Cannot inspect input {path:?}"))?;
@@ -842,25 +1152,14 @@ fn collect_files(input: &Path) -> Result<Vec<PathBuf>> {
             "Game input symlinks are not followed: {path:?}"
         );
         if metadata.is_file() {
-            ensure!(
-                files.len() < MAX_FILES,
-                "Game input contains too many files"
-            );
-            files.try_reserve(1)?;
+            budget.visit_file()?;
+            files.try_reserve(1).map_err(allocation_limit)?;
             files.push(path);
         } else if metadata.is_dir() {
-            directories += 1;
-            ensure!(
-                directories <= MAX_DIRECTORIES,
-                "Game input contains too many directories"
-            );
+            budget.visit_directory()?;
             for entry in fs::read_dir(&path)? {
-                entries += 1;
-                ensure!(
-                    entries <= MAX_FILES + MAX_DIRECTORIES,
-                    "Game input contains too many directory entries"
-                );
-                pending.try_reserve(1)?;
+                budget.visit_entry()?;
+                pending.try_reserve(1).map_err(allocation_limit)?;
                 pending.push((entry?.path(), depth + 1));
             }
         } else {
@@ -1273,5 +1572,309 @@ mod tests {
         )
         .unwrap();
         assert!(prepare_regions_with_policy(directory.path(), "ProjectSekai", 1024, true).is_err());
+    }
+
+    #[test]
+    fn shared_preparation_budget_cannot_reset_across_separate_selected_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let mut encoded = 0x20_u32.to_le_bytes().to_vec();
+        encoded.extend_from_slice(&plain());
+        let a = root.path().join("a.bundle");
+        let b = root.path().join("b.bundle");
+        fs::write(&a, &encoded).unwrap();
+        fs::write(&b, &encoded).unwrap();
+        let mut budget = GamePreparationBudget::new(300).unwrap();
+        let first = prepare_regions_with_budget(&a, "ProjectSekai", &mut budget, false)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(first[0].1.len(), 256);
+        let error = prepare_regions_with_budget(&b, "ProjectSekai", &mut budget, true).unwrap_err();
+        assert!(error.is::<GameBudgetExceeded>());
+        assert_eq!(budget.retained_bytes, 256);
+        assert_eq!(budget.materialized_input_bytes, 260);
+        assert_eq!(first[0].1.read_to_vec(300).unwrap(), plain());
+    }
+
+    #[test]
+    fn expansion_limits_remain_fatal_through_continue_policy_and_context() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("oversized-table.bundle");
+        let mut bundle = b"UnityFS\0".to_vec();
+        bundle.extend_from_slice(&6u32.to_be_bytes());
+        bundle.extend_from_slice(b"5.x.x\0");
+        bundle.extend_from_slice(b"2017.4.18f1\0");
+        let size_offset = bundle.len();
+        bundle.extend_from_slice(&0u64.to_be_bytes());
+        bundle.extend_from_slice(&0u32.to_be_bytes());
+        bundle.extend_from_slice(&8192u32.to_be_bytes());
+        bundle.extend_from_slice(&0x40u32.to_be_bytes());
+        let length = bundle.len() as u64;
+        bundle[size_offset..size_offset + 8].copy_from_slice(&length.to_be_bytes());
+        fs::write(&path, bundle).unwrap();
+
+        for profile in ["ExAstris", "NetEase"] {
+            let error = prepare_regions_with_policy(&path, profile, 1024, true)
+                .unwrap_err()
+                .context("Selected-input operation failed");
+            assert!(is_preparation_limit(&error), "{profile}: {error:#}");
+        }
+        // A hostile LZMA dictionary is also a resource limit, even though the
+        // table's declared output and compressed input are both tiny.
+        let error = bundle::decompress_table(&[0x5d, 0, 0, 0, 0x10], 1, 1)
+            .unwrap_err()
+            .context("Could not decode selected game input");
+        assert!(is_preparation_limit(&error), "{error:#}");
+    }
+
+    #[test]
+    fn shared_path_metadata_exhaustion_remains_fatal_across_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("a.resS");
+        let second = root.path().join("b.resS");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let mut budget = GamePreparationBudget::new(10).unwrap();
+        prepare_regions_with_budget(&first, "Naraka", &mut budget, true).unwrap();
+        assert_eq!(
+            budget.source_path_bytes,
+            first.as_os_str().as_encoded_bytes().len()
+        );
+        // Represent earlier selected roots without allocating 256 MiB of
+        // actual path strings in a regression test.
+        budget.source_path_bytes = 256 * 1024 * 1024;
+        let error = prepare_regions_with_budget(&second, "Naraka", &mut budget, true).unwrap_err();
+        assert!(is_preparation_limit(&error));
+        assert_eq!(budget.sources.len(), 1);
+        assert_eq!(budget.retained_bytes, 0);
+    }
+
+    #[test]
+    fn discovery_depth_limit_is_fatal_in_continue_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let mut nested = root.path().to_path_buf();
+        for _ in 0..=MAX_DIRECTORY_DEPTH {
+            nested.push("d");
+            fs::create_dir(&nested).unwrap();
+        }
+        let error = prepare_regions_with_policy(root.path(), "Naraka", 10, true).unwrap_err();
+        assert!(is_preparation_limit(&error), "{error:#}");
+    }
+
+    #[test]
+    fn oversized_selected_paths_are_limits_before_filesystem_lookup() {
+        let path = PathBuf::from("a".repeat(MAX_PATH_BYTES + 1));
+        let error = prepare_regions_with_policy(&path, "Naraka", 10, true).unwrap_err();
+        assert!(is_preparation_limit(&error), "{error:#}");
+    }
+
+    #[test]
+    fn discovery_and_diagnostic_allowances_do_not_reset_between_selected_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.resS");
+        let b = root.path().join("b.resS");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+
+        let mut files = GamePreparationBudget::new(100).unwrap();
+        files.discovered_files = MAX_FILES - 1;
+        prepare_regions_with_budget(&a, "Naraka", &mut files, true).unwrap();
+        assert!(is_preparation_limit(
+            &prepare_regions_with_budget(&b, "Naraka", &mut files, true).unwrap_err()
+        ));
+
+        let mut directories = GamePreparationBudget::new(100).unwrap();
+        directories.discovered_directories = MAX_DIRECTORIES - 1;
+        prepare_regions_with_budget(root.path(), "Naraka", &mut directories, true).unwrap();
+        assert!(is_preparation_limit(
+            &prepare_regions_with_budget(root.path(), "Naraka", &mut directories, true)
+                .unwrap_err()
+        ));
+
+        let mut entries = GamePreparationBudget::new(100).unwrap();
+        entries.discovered_entries = MAX_FILES + MAX_DIRECTORIES - 2;
+        prepare_regions_with_budget(root.path(), "Naraka", &mut entries, true).unwrap();
+        assert!(is_preparation_limit(
+            &prepare_regions_with_budget(root.path(), "Naraka", &mut entries, true).unwrap_err()
+        ));
+
+        let bad_a = root.path().join("a.bundle");
+        let bad_b = root.path().join("b.bundle");
+        fs::write(&bad_a, b"malformed").unwrap();
+        fs::write(&bad_b, b"malformed").unwrap();
+        let mut diagnostics = GamePreparationBudget::new(100).unwrap();
+        let (_, messages) =
+            prepare_regions_with_budget(&bad_a, "Naraka", &mut diagnostics, true).unwrap();
+        assert_eq!(diagnostics.diagnostic_bytes, messages[0].len());
+        diagnostics.diagnostic_bytes = 16 * 1024 * 1024;
+        let error =
+            prepare_regions_with_budget(&bad_b, "Naraka", &mut diagnostics, true).unwrap_err();
+        assert!(is_preparation_limit(&error), "{error:#}");
+        assert_eq!(diagnostics.materialized_input_bytes, 18);
+    }
+
+    #[test]
+    fn failed_decode_work_remains_charged_across_preparation_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.bundle");
+        let b = root.path().join("b.bundle");
+        fs::write(&a, [0x61; 80]).unwrap();
+        fs::write(&b, [0x62; 80]).unwrap();
+        let mut budget = GamePreparationBudget::new(100).unwrap();
+        let (first, diagnostics) =
+            prepare_regions_with_budget(&a, "ProjectSekai", &mut budget, true).unwrap();
+        assert!(first.unwrap().is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(budget.materialized_input_bytes, 80);
+        assert_eq!(budget.retained_bytes, 0);
+        assert!(
+            prepare_regions_with_budget(&b, "ProjectSekai", &mut budget, true)
+                .unwrap_err()
+                .is::<GameBudgetExceeded>()
+        );
+    }
+
+    #[test]
+    fn encrypted_split_parts_join_in_numeric_order_and_keep_unsuffixed_filename_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = plain();
+        let encoded = decode_reverse(&expected, Path::new("asset.bundle")).unwrap();
+        let mut parts = Vec::new();
+        for (index, bytes) in encoded.chunks(22).enumerate() {
+            let path = root.path().join(format!("asset.bundle.split{index}"));
+            fs::write(&path, bytes).unwrap();
+            parts.push((path, bytes.to_vec()));
+        }
+        assert!(parts.len() > 10);
+        let regions = prepare_regions(&parts[10].0, "Reverse1999", 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!(regions[0].0.ends_with("asset.bundle"));
+        assert_eq!(regions[0].1.read_to_vec(1024).unwrap(), expected);
+        for (path, bytes) in parts {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        fs::write(root.path().join("asset.resS.split0"), b"resource-").unwrap();
+        fs::write(root.path().join("asset.resS.split1"), b"stream").unwrap();
+        let regions = prepare_regions(root.path(), "Reverse1999", 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(
+            regions
+                .iter()
+                .find(|(name, _)| name.ends_with("asset.resS"))
+                .unwrap()
+                .1
+                .read_to_vec(1024)
+                .unwrap(),
+            b"resource-stream"
+        );
+    }
+
+    #[test]
+    fn incomplete_ambiguous_and_oversized_split_groups_are_explicit_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("bundle.split0");
+        let last = root.path().join("bundle.split2");
+        fs::write(&first, [0x61; 80]).unwrap();
+        fs::write(&last, [0x62; 80]).unwrap();
+        assert!(prepare_regions(&first, "ProjectSekai", 1024).is_err());
+        let (regions, diagnostics) =
+            prepare_regions_with_policy(&first, "ProjectSekai", 1024, true).unwrap();
+        assert!(regions.unwrap().is_empty());
+        assert!(diagnostics[0].contains("missing segment 1"));
+        fs::rename(last, root.path().join("bundle.split00")).unwrap();
+        assert!(
+            prepare_regions(&first, "ProjectSekai", 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+        fs::rename(
+            root.path().join("bundle.split00"),
+            root.path().join("bundle.split1"),
+        )
+        .unwrap();
+        assert!(
+            prepare_regions_with_policy(&first, "ProjectSekai", 100, true)
+                .unwrap_err()
+                .is::<GameBudgetExceeded>()
+        );
+        fs::write(
+            root.path().join("bundle"),
+            b"unambiguous selection required",
+        )
+        .unwrap();
+        assert!(
+            prepare_regions(root.path(), "ProjectSekai", 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("Both a complete input")
+        );
+        assert!(
+            prepare_regions(&first, "ProjectSekai", 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("Both a complete input")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_split_part_never_follows_a_symlink_companion() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("wrapped.split0");
+        fs::write(&first, b"first bytes").unwrap();
+        let target = root.path().join("outside");
+        fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join("wrapped.split1")).unwrap();
+        assert!(prepare_regions(&first, "ProjectSekai", 1024).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn love_and_deepspace_prefix_key_matches_original_csharp_oracle() {
+        let encoded = include_bytes!("../tests/fixtures/mhy-oracle/LnD-reference.encrypted");
+        let expected = include_bytes!("../tests/fixtures/mhy-oracle/LnD-reference.bin");
+        assert_eq!(decode_love_and_deepspace(encoded).unwrap(), expected);
+        for length in 0..16 {
+            assert!(decode_love_and_deepspace(&encoded[..length]).is_err());
+        }
+    }
+
+    #[test]
+    fn choosing_multiple_parts_or_overlapping_paths_only_decodes_each_source_once() {
+        let root = tempfile::tempdir().unwrap();
+        let mut encoded = 0x20_u32.to_le_bytes().to_vec();
+        encoded.extend_from_slice(&plain());
+        let a = root.path().join("asset.bundle.split0");
+        let b = root.path().join("asset.bundle.split1");
+        fs::write(&a, &encoded[..100]).unwrap();
+        fs::write(&b, &encoded[100..]).unwrap();
+        let mut budget = GamePreparationBudget::new(300).unwrap();
+        let first = prepare_regions_with_budget(&a, "ProjectSekai", &mut budget, false)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(
+            prepare_regions_with_budget(&b, "ProjectSekai", &mut budget, false)
+                .unwrap()
+                .0
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            prepare_regions_with_budget(root.path(), "ProjectSekai", &mut budget, false)
+                .unwrap()
+                .0
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(budget.materialized_input_bytes, 260);
+        assert_eq!(budget.retained_bytes, 256);
+        assert_eq!(budget.sources.len(), 1);
     }
 }

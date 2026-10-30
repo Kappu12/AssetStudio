@@ -29,21 +29,56 @@ A stub or a raw-data fallback is not parity with an existing decoded export.
 
 ## Format backend
 
-The candidate backend is the MIT-licensed `unity-rs-core`, pinned to
+The backend is the MIT-licensed `unity-rs-core` 0.6.1, based on
 `b3e509ed09fe6ff3a897d04ddb75eb5214482265` from
 <https://github.com/seiunx-dev/unity-rs>. It provides native Rust Unity format
-readers and exporters; this repository owns the desktop app, CLI, selection,
+readers and exporters. Its source is now vendored in `vendor/unity-rs-core`,
+patched by Cargo and tested as an explicit workspace member with one lockfile.
+The upstream pin, local changes and source digest are separate provenance:
+see the backend's `ASSETSTUDIO_PATCHES.md`. This repository owns the desktop app, CLI, selection,
 grouping, compatibility adapters, packaging, and acceptance checks.
 The original copyright notices and backend attribution must ship with packages.
 
 ## Validation record
 
 The native Rust application and pipeline are implemented on the development
-branch, with explicit remaining compatibility gaps. The final combined local
-snapshot passes 213 Rust tests, strict Clippy, formatting, an optimized Linux
-build, native-program smoke checks, Windows GNU cross-target checking and 32
-pipeline tests. Two independent full first-party source sweeps are recorded in
+branch, with explicit remaining compatibility gaps. Checkpoint `6fad9ef` passed
+213 application tests, strict Clippy, formatting, an optimized Linux build,
+native-program smoke checks, Windows GNU cross-target checking and 32 pipeline
+tests. These are historical results. The resumed frozen source has additional
+backend, game, model, animation, class-structure and GUI regressions; final
+combined gates are pending. The delivery suite now has 37 passing Python tests.
+Two independent source sweeps and current addenda are recorded in
 [review-sweeps.md](review-sweeps.md). No release has been created.
+
+## Resumed compatibility work, 2026-10-30
+
+- 27 of 39 game profiles now have accepted paths, including five added container
+  and explicit serialized-field variants. Encrypted numeric split groups and
+  multi-input wrapper budgets are shared across a whole operation.
+- Static batching retains renderer submesh/root identities, compacts all vertex
+  channels and reconstructs world/root-space placement. Synthetic parser fixtures
+  and independent FBX imports verify nonuniform/negative owner transforms,
+  material subsets and an unrelated batch root.
+- Both FBX encodings support 7100–7500 with correct record widths, normal/color/
+  tangent/UV0–7/material layers, matching imported object names, UV-role selection
+  and per-binding texture transforms. GUI/CLI expose model filtering, scaling,
+  skin/material/blend-shape controls, Euler unroll and bone display settings.
+- Standard modern streamed/dense/constant animation bindings expand to `.anim`
+  with bounded samples and resolved names. Non-null Unity reference GUIDs and
+  unmapped custom/external ACL contracts remain explicit errors.
+- A separate safe Rust backend API decodes standard resident ACL scalar/QVV
+  samples; twelve genuine upstream ACL 2.1 compressed fixtures and independent
+  CSV samples establish that scope, without a C++ runtime dependency.
+- The GUI has embedded class definitions, Preview/Dump/JSON switching and actual
+  source normals/colors. Stale workers and settings are covered by targeted
+  regressions. New independent reviews fixed wrapper-budget recovery, skin-node
+  pruning, missing binary FBX layers, UV/texture binding corruption, dropped
+  nonempty mesh failures and deep-hierarchy stack exhaustion.
+
+The [feature table](feature-parity.md) and [game matrix](game-compatibility.md)
+describe remaining ports and acceptance requirements. This work is not evidence
+that every original-fork feature or current proprietary game build works.
 
 ## Published development checkpoints
 

@@ -483,6 +483,12 @@ fn unsupported_and_invalid_options_fail_before_creating_outputs() {
         ("--types", "TextAsset:Broken"),
         ("--game", "MissingGameProfile"),
         ("--unity-cn-key", "not-a-key"),
+        ("--scale-factor", "0"),
+        ("--scale-factor", "NaN"),
+        ("--bone-size", "inf"),
+        ("--fbx-version", "7600"),
+        ("--uv-channels", "8"),
+        ("--uv-slot", "0:Unknown"),
     ] {
         let destination = root.path().join("must-not-exist");
         let output = run(&[string(&input), string(&destination), flag, value]);
@@ -493,6 +499,82 @@ fn unsupported_and_invalid_options_fail_before_creating_outputs() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!destination.exists(), "{flag} caused output creation");
+    }
+}
+
+#[test]
+fn real_model_controls_scale_geometry_and_omit_selected_uvs_and_materials() {
+    let root = TempDir::new().unwrap();
+    let input = root.path().join("triangle.assets");
+    fs::write(
+        &input,
+        include_bytes!("../../assetstudio-core/tests/fixtures/models/triangle.assets"),
+    )
+    .unwrap();
+    let output = root.path().join("scaled");
+    let result = run(&[
+        string(&input),
+        string(&output),
+        "--operation",
+        "model",
+        "--model-format",
+        "obj",
+        "--scale-factor",
+        "2",
+        "--uv-channels",
+        "1",
+        "--no-materials",
+        "--no-skins",
+        "--no-blend-shapes",
+        "--prune-nodes",
+        "--no-animations",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let obj = fs::read_to_string(output.join("scene/scene.obj")).unwrap();
+    assert!(obj.lines().any(|line| line == "v -4 6 8"), "{obj}");
+    assert!(
+        !obj.lines().any(|line| line.starts_with("vt ")),
+        "disabled UV0 must not survive"
+    );
+    assert!(
+        !descendants(&output)
+            .iter()
+            .any(|path| path.extension().is_some_and(|ext| ext == "png"))
+    );
+    for version in [7100, 7200, 7300, 7400, 7500] {
+        let target = root.path().join(format!("fbx-{version}"));
+        let result = run(&[
+            string(&input),
+            string(&target),
+            "--operation",
+            "model",
+            "--model-format",
+            "fbx-binary",
+            "--fbx-version",
+            &version.to_string(),
+            "--bone-size",
+            "37.5",
+            "--cast-to-bone",
+            "--uv-slot",
+            "0:NormalMap",
+            "--no-animations",
+            "--no-textures",
+        ]);
+        assert!(
+            result.status.success(),
+            "{version}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let fbx = fs::read(target.join("scene/scene.fbx")).unwrap();
+        assert_eq!(u32::from_le_bytes(fbx[23..27].try_into().unwrap()), version);
+        let records =
+            unity_rs_core::fbx_binary::parse_fbx_binary_with_limits(&fbx, Default::default())
+                .unwrap();
+        assert!(!records.is_empty());
     }
 }
 

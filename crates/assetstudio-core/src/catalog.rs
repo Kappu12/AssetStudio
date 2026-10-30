@@ -116,6 +116,10 @@ pub enum Preview {
     Mesh {
         vertices: Vec<[f32; 3]>,
         indices: Vec<u32>,
+        /// Source normals, in the same coordinate system as the vertices.
+        normals: Option<Vec<[f32; 3]>>,
+        /// Source per-vertex RGBA; absent channels are never synthesized.
+        colors: Option<Vec<[f32; 4]>>,
     },
 }
 

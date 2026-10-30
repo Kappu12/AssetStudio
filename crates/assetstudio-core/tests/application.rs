@@ -81,6 +81,38 @@ fn session(objects: &[(i32, i64, Vec<u8>)]) -> Session {
 }
 
 #[test]
+fn continued_multi_input_load_and_extraction_cannot_swallow_shared_game_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let valid = root.path().join("valid.assets");
+    fs::write(&valid, file(&[(49, 7, text("hello", b"payload"))])).unwrap();
+    let oversized = root.path().join("oversized.bundle");
+    let sparse = fs::File::create(&oversized).unwrap();
+    sparse.set_len(512 * 1024 * 1024 + 1).unwrap();
+    drop(sparse);
+    let paths = [valid, oversized];
+    let options = LoadOptions {
+        game: "CodenameJump".into(),
+        continue_on_error: true,
+        ..LoadOptions::default()
+    };
+    let error = Session::open_paths(&paths, &options).unwrap_err();
+    assert!(format!("{error:#}").contains("budget"));
+    let error = Session::extract_paths_with_auxiliary_inputs(
+        &paths,
+        &root.path().join("outputs"),
+        &options,
+        false,
+        &[],
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("budget"));
+    assert_eq!(
+        fs::metadata(&paths[1]).unwrap().len(),
+        512 * 1024 * 1024 + 1
+    );
+}
+
+#[test]
 fn unity6_text_roundtrip_raw_and_converted_and_selection() {
     let first = text("first", b"hello\0binary\xff");
     let second = text("second", b"other");

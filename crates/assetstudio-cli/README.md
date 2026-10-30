@@ -16,6 +16,10 @@ AssetStudioCLI game_Data exported --asset-map maps/assets_map.map --asset-base g
 AssetStudioCLI game_Data exported --map_op AssetMap,Load --map_name maps/assets_map.json --map_type JSON
 AssetStudioCLI bundle models --operation model --model-format fbx-binary
 AssetStudioCLI bundle models --operation model --no-animations --no-textures
+AssetStudioCLI bundle models --operation model --fbx-version 7500 --scale-factor 0.01 --prune-nodes
+AssetStudioCLI bundle models --operation model --uv-channels 0,1 --uv-slot 1:NormalMap
+AssetStudioCLI bundle exported --types AnimationClip
+AssetStudioCLI archive.split3 exported --game TOT
 AssetStudioCLI bundle unpacked --operation extract
 AssetStudioCLI game_Data maps --map_op Both --map_type JSON
 AssetStudioCLI game_Data/a.bundle exported --cab-map maps/assets_map.bin
@@ -59,6 +63,14 @@ Legacy positional invocations and these option spellings remain available:
 | `--map_type`, `--map_name` | JSON, XML, or MessagePack (`.map`) and a portable output filename; the output directory comes from the second positional argument. |
 | `--no-animations`, `--ignore_controller_anim` | Export models without controller or clip decoding, also during converted asset export. |
 | `--no-textures` | Omit model texture decoding and model-side image output. |
+| `--no-skins`, `--no-materials`, `--no-blend-shapes` | Omit model weights/bindings, materials and dependent textures, or morph geometry and its tracks. |
+| `--prune-nodes` | Keep renderable nodes, required skin bones and their ancestors; remove unused nodes. |
+| `--scale-factor` | Scale geometry, bind-pose translations and animation translations; valid range is 0.000001–1000000, default 1. |
+| `--no-euler-filter` | Preserve wrapped source Euler angles instead of unrolling equivalent +/-180-degree crossings. Explicit multi-turn values remain intact either way. |
+| `--uv-channels` | Comma-separated source UV indexes 0–7 to retain; all eight are enabled by default. |
+| `--uv-slot` | Repeatable `channel:semantic` mapping for FBX textures; e.g. `1:NormalMap`. |
+| `--fbx-version` | ASCII/binary schema 7100, 7200, 7300, 7400 (default) or 7500. |
+| `--cast-to-bone`, `--bone-size` | Represent transform-only FBX nodes as joints and set joint display size (default 10); geometry remains mesh geometry. |
 | `--silent` | Suppress informational output; errors and partial-load diagnostics are still reported. |
 | `--logger_flags` | Recognized legacy categories control informational output. |
 
@@ -116,6 +128,43 @@ container extraction, or CAB cache writing. Model and asset-map exports currentl
 preserve existing files. Loaded input files are protected even with `--overwrite`.
 The `--image-format` switch selects PNG, JPEG, BMP, or TGA for converted textures
 and sprites. Model output supports ASCII FBX, binary FBX, and OBJ with textures.
+
+## Model and animation scope
+
+Model controls also apply to converted GameObject/Animator asset exports.
+Static-batched meshes retain each renderer's submesh subset, materials and
+world/batch-root placement. Source normals, tangents, colors and UV0–7 survive
+compaction. Synthetic format-22 files check nonuniform/negative transforms and
+an unrelated batch root; these are not a real-game compatibility claim.
+
+FBX UV semantics are Diffuse, NormalMap, Specular, Bump, Ambient, Emissive,
+Reflection and Displacement (numeric aliases 0–7). Each source UV slot defaults
+to Diffuse. A texture uses the first matching semantic emitted by every geometry
+sharing its material, then falls back to a common existing UV set. If no UVs
+exist, no named UV reference is written. Incompatible shared-material UV sets
+fail explicitly. Different texture offsets/scales remain distinct even when
+they share one image file. FBX 7500 uses 64-bit node headers; 7100–7400 use
+32-bit headers. FBX 6.x is unavailable.
+
+Converted AnimationClips produce Unity YAML `.anim` for explicit/packed legacy
+curves and standard streamed/dense/constant modern bindings. Values remain in
+Unity coordinates, with real paths/property names and reconstructed tangents.
+Non-null object/script/event references fail until exported Unity GUID metadata
+can remap them; null pointers remain null. Unresolved identities, separate
+discrete streamed layouts and unmapped custom/external ACL streams also fail
+explicitly. Raw/JSON export remains available for inspection.
+
+The separate backend `acl::decode_compressed_tracks` API decodes supported
+resident standard ACL samples; it does not automatically provide a game's
+Unity binding map or enable opaque game ACL `.anim`/FBX export. See the
+[feature table](../../docs/feature-parity.md) and
+[27-profile compatibility matrix](../../docs/game-compatibility.md).
+
+Numeric encrypted `.splitN` parts are joined lazily before wrapper decoding.
+Selecting any part discovers the full contiguous group, and overlapping inputs
+share discovery/read/decoded budgets. Preserve original logical filenames for
+filename-derived keys. `--continue-on-error` cannot recover from shared resource
+limit violations; it only skips individual format/I/O failures.
 
 ## Exit status
 
