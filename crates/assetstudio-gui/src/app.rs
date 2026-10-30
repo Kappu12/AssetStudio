@@ -2070,6 +2070,9 @@ impl StudioApp {
                             .max_rect(rect.shrink2(egui::vec2(4.0, 2.0)))
                             .layout(Layout::left_to_right(Align::Center)),
                     );
+                    // Cells belong to the row hit target. Selectable labels
+                    // otherwise consume clicks and show a text-edit cursor.
+                    row_ui.style_mut().interaction.selectable_labels = false;
                     row_ui.add_sized([widths[0], 25.0], egui::Label::new(&asset.name).truncate());
                     row_ui.add_sized(
                         [widths[1], 25.0],
@@ -3382,6 +3385,87 @@ pub fn smoke_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clicking_text_in_every_asset_column_selects_the_whole_row() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let key = AssetKey {
+            file_index: 0,
+            path_id: 123,
+        };
+        app.assets = Arc::new(vec![AssetRecord {
+            key,
+            class_id: 43,
+            class_name: "Mesh".into(),
+            name: "Clickable mesh".into(),
+            container: "assets/unique/model.prefab".into(),
+            source: "CAB-click".into(),
+            size: 4096,
+        }]);
+        app.visible = vec![0];
+        let render = |app: &mut StudioApp, events| {
+            context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| app.asset_table(ui));
+                },
+            )
+        };
+        let mut output = render(&mut app, vec![]);
+        for label in [
+            "Clickable mesh",
+            "Mesh",
+            "4.0 KiB",
+            "assets/unique/model.prefab",
+        ] {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.pos + egui::vec2(4.0, text.galley.size().y * 0.5))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing cell {label}"));
+            app.selected.clear();
+            app.primary = None;
+            let _ = render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            assert_eq!(
+                app.primary,
+                Some(key),
+                "clicking the middle of {label} must select its row"
+            );
+            assert!(app.selected.contains(&key));
+            output = render(&mut app, vec![]);
+            assert_ne!(output.platform_output.cursor_icon, egui::CursorIcon::Text);
+        }
+    }
 
     #[test]
     fn type_widgets_toggle_multiple_checks_and_cycle_sort_without_losing_them() {
