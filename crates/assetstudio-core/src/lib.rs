@@ -28,6 +28,9 @@ pub use catalog::{
 };
 pub use filter::AssetFilter;
 pub use session::Session;
+pub use unity_rs_core::loader::{
+    LoadProgress as ProgressUpdate, LoadProgressObserver as ProgressObserver,
+};
 
 pub use model_options::ModelExportOptions;
 pub use unity_rs_core::fbx_ascii::{FbxExportSettings, FbxUvType};

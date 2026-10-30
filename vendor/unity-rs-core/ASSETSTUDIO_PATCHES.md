@@ -107,3 +107,10 @@ Windows checkout attributes preserve exact vendored legal/provenance bytes so
 real dependency-license SHA-256 checks survive core.autocrlf. The actual portable
 Windows ZIP, its PE imports, source/license inventory and extracted native smoke
 checks passed locally after that correction.
+
+## Desktop loading progress
+
+Optional worker-thread progress observers report file reads and metadata indexing
+without changing the existing load entry points. Counts describe completed work
+within each named phase; phases with unknown totals remain indeterminate. The
+application adds catalog, browser preparation and export progress for its footer.

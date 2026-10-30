@@ -135,6 +135,31 @@ pub struct LoadDiagnostic {
 /// through its error text.
 const MAXIMUM_DIAGNOSTIC_MESSAGE_BYTES: usize = 4096;
 
+/// Actual completed work within one loading phase; `None` denotes an unknown total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadProgress {
+    pub stage: &'static str,
+    pub completed: usize,
+    pub total: Option<usize>,
+}
+
+pub type LoadProgressObserver = Arc<dyn Fn(LoadProgress) + Send + Sync>;
+
+fn report_progress(
+    observer: Option<&LoadProgressObserver>,
+    stage: &'static str,
+    completed: usize,
+    total: Option<usize>,
+) {
+    if let Some(observer) = observer {
+        observer(LoadProgress {
+            stage,
+            completed,
+            total,
+        });
+    }
+}
+
 /// How one root is opened, shared by every `load*` entry point.
 struct RootLoadSettings<'a> {
     limits: &'a AssetLoadLimits,
@@ -148,6 +173,8 @@ struct RootLoadSettings<'a> {
 
 #[derive(Clone, Default)]
 pub struct AssetLoadOptions {
+    /// Optional worker-thread notifications; observers must not block decoding.
+    pub progress: Option<LoadProgressObserver>,
     pub limits: AssetLoadLimits,
     pub unity_version_override: Option<UnityVersion>,
     pub oodle_decoder: Option<Arc<dyn OodleDecoder>>,
@@ -575,6 +602,7 @@ impl AssetCollection {
         options: AssetLoadOptions,
     ) -> Result<Self> {
         let AssetLoadOptions {
+            progress,
             limits,
             unity_version_override,
             oodle_decoder,
@@ -600,7 +628,7 @@ impl AssetCollection {
             },
             &mut budget,
         )?;
-        collection.rebuild_object_metadata(&limits)?;
+        collection.rebuild_object_metadata_with_progress(&limits, progress.as_ref())?;
         Ok(collection)
     }
 
@@ -612,6 +640,7 @@ impl AssetCollection {
         options: AssetLoadOptions,
     ) -> Result<Self> {
         let AssetLoadOptions {
+            progress,
             limits,
             unity_version_override,
             oodle_decoder,
@@ -642,10 +671,11 @@ impl AssetCollection {
                     limits.maximum_input_files
                 )));
             }
+            report_progress(progress.as_ref(), "Reading inputs", root_count - 1, None);
             let label = LoadPath::from_owned(label, &limits, &mut budget)?;
             collection.load_root_with_policy(label, region, &settings, &mut budget)?;
         }
-        collection.rebuild_object_metadata(&limits)?;
+        collection.rebuild_object_metadata_with_progress(&limits, progress.as_ref())?;
         Ok(collection)
     }
 
@@ -672,6 +702,7 @@ impl AssetCollection {
         options: AssetLoadOptions,
     ) -> Result<Self> {
         let AssetLoadOptions {
+            progress,
             limits,
             unity_version_override,
             oodle_decoder,
@@ -680,6 +711,7 @@ impl AssetCollection {
             strict_unity_versions,
             game_variant,
         } = options;
+        report_progress(progress.as_ref(), "Finding files", 0, None);
         let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         let mut budget = AssetLoadBudget::default();
@@ -705,10 +737,13 @@ impl AssetCollection {
             game_variant,
         };
         let mut collection = Self::default();
-        for (label, region) in inputs {
+        let total = inputs.len();
+        report_progress(progress.as_ref(), "Reading files", 0, Some(total));
+        for (index, (label, region)) in inputs.into_iter().enumerate() {
             collection.load_root_with_policy(label, region, &settings, &mut budget)?;
+            report_progress(progress.as_ref(), "Reading files", index + 1, Some(total));
         }
-        collection.rebuild_object_metadata(&limits)?;
+        collection.rebuild_object_metadata_with_progress(&limits, progress.as_ref())?;
         Ok(collection)
     }
 
@@ -1125,9 +1160,33 @@ impl AssetCollection {
     }
 
     fn rebuild_object_metadata(&mut self, limits: &AssetLoadLimits) -> Result<()> {
+        self.rebuild_object_metadata_with_progress(limits, None)
+    }
+
+    pub fn resolve_object_metadata_with_progress(
+        &mut self,
+        limits: AssetLoadLimits,
+        progress: Option<&LoadProgressObserver>,
+    ) -> Result<()> {
+        self.rebuild_object_metadata_with_progress(&limits, progress)
+    }
+
+    fn rebuild_object_metadata_with_progress(
+        &mut self,
+        limits: &AssetLoadLimits,
+        progress: Option<&LoadProgressObserver>,
+    ) -> Result<()> {
+        report_progress(progress, "Building reference indexes", 0, None);
         self.rebuild_reference_index(*limits)?;
         self.rebuild_resource_index(*limits)?;
         self.rebuild_sprite_atlas_index(*limits)?;
+        let total = self
+            .serialized_files
+            .iter()
+            .map(|loaded| loaded.file.objects.len())
+            .sum();
+        let mut completed = 0;
+        report_progress(progress, "Reading asset names", 0, Some(total));
         let mut metadata = ObjectMetadataBuilder::default();
         let mut pending_names = PendingObjectNames::default();
         let mut assignment_count = 0_usize;
@@ -1137,6 +1196,10 @@ impl AssetCollection {
             let loaded = &self.serialized_files[file_index];
             let mut preload_table = Vec::new();
             for (object_index, object) in loaded.file.objects.iter().enumerate() {
+                if completed % 4096 == 0 {
+                    report_progress(progress, "Reading asset names", completed, Some(total));
+                }
+                completed += 1;
                 pending_names.collect(
                     &mut metadata,
                     file_index,
@@ -1163,6 +1226,8 @@ impl AssetCollection {
             }
         }
 
+        report_progress(progress, "Reading asset names", completed, Some(total));
+        report_progress(progress, "Resolving asset names", 0, None);
         pending_names.resolve(
             self,
             &mut metadata,

@@ -30,7 +30,15 @@ pub struct Catalog {
 
 impl Catalog {
     /// Materialized by the load worker, including all copying and indexes.
+    #[cfg(test)]
     pub fn prepare(records: &[AssetRecord]) -> Result<Self, String> {
+        Self::prepare_with_progress(records, |_, _| {})
+    }
+
+    pub fn prepare_with_progress(
+        records: &[AssetRecord],
+        mut progress: impl FnMut(usize, usize),
+    ) -> Result<Self, String> {
         let mut assets = Vec::new();
         assets
             .try_reserve_exact(records.len())
@@ -48,7 +56,11 @@ impl Catalog {
             output.push_str(value);
             Ok(output)
         };
-        for record in records {
+        progress(0, records.len());
+        for (index, record) in records.iter().enumerate() {
+            if index % 4096 == 0 {
+                progress(index, records.len());
+            }
             if by_key.insert(record.key, assets.len()).is_some() {
                 return Err("The asset catalog contains duplicate object identities.".to_owned());
             }
@@ -63,6 +75,7 @@ impl Catalog {
                 size: record.size,
             });
         }
+        progress(records.len(), records.len());
         Ok(Self {
             assets: Arc::new(assets),
             classes,

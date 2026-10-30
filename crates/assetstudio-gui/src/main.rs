@@ -5,6 +5,7 @@ mod audio;
 mod preferences;
 mod preview_geometry;
 mod preview_image;
+mod progress;
 mod view;
 
 use std::path::PathBuf;

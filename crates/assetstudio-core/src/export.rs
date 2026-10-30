@@ -105,11 +105,25 @@ impl Session {
         options: &ExportOptions,
         model_options: &crate::ModelExportOptions,
     ) -> Result<OperationReport> {
+        self.export_with_progress(keys, output, options, model_options, None)
+    }
+
+    pub fn export_with_progress(
+        &self,
+        keys: &[AssetKey],
+        output: &Path,
+        options: &ExportOptions,
+        model_options: &crate::ModelExportOptions,
+        progress: Option<&crate::ProgressObserver>,
+    ) -> Result<OperationReport> {
         let records = self.selected(keys)?;
         let destination = SafeOutput::new(output)?;
         let mut report = OperationReport::default();
         let mut total = 0u64;
-        for record in records {
+        let count = records.len();
+        crate::session::report_progress(progress, "Exporting assets", 0, Some(count));
+        for (index, record) in records.into_iter().enumerate() {
+            crate::session::report_progress(progress, "Exporting assets", index, Some(count));
             if options.mode == ExportMode::Convert && matches!(record.class_id, 1 | 95) {
                 let folder = destination.directory(&group_directory(record, options.group))?;
                 match self.export_scene_with_limit_and_options(
@@ -149,6 +163,7 @@ impl Session {
                 Err(error) => report.failed.push(failure(record, &error)),
             }
         }
+        crate::session::report_progress(progress, "Exporting assets", count, Some(count));
         Ok(report)
     }
 

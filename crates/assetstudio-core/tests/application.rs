@@ -81,6 +81,86 @@ fn session(objects: &[(i32, i64, Vec<u8>)]) -> Session {
 }
 
 #[test]
+fn loading_and_export_progress_tracks_real_work_and_preserves_payloads() {
+    use std::sync::{Arc, Mutex};
+    let source = tempfile::tempdir().unwrap();
+    let expected = [
+        ("a.assets", 7, b"alpha".as_slice()),
+        ("b.assets", 8, b"beta".as_slice()),
+    ];
+    for (name, id, bytes) in expected {
+        fs::write(
+            source.path().join(name),
+            file(&[(49, id, text(name, bytes))]),
+        )
+        .unwrap();
+    }
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let captured = updates.clone();
+    let observer: assetstudio_core::ProgressObserver =
+        Arc::new(move |update| captured.lock().unwrap().push(update));
+    let session = Session::open_with_progress(
+        source.path(),
+        &LoadOptions::default(),
+        Some(observer.clone()),
+    )
+    .unwrap();
+    assert_eq!(session.assets().len(), 2);
+    for stage in ["Reading files", "Reading asset names", "Building catalog"] {
+        let updates = updates.lock().unwrap();
+        let stage: Vec<_> = updates
+            .iter()
+            .filter(|update| update.stage == stage)
+            .collect();
+        assert!(!stage.is_empty());
+        assert_eq!(stage.last().unwrap().completed, 2);
+        assert!(
+            stage
+                .iter()
+                .all(|update| update.total == Some(2) && update.completed <= 2)
+        );
+        assert!(
+            stage
+                .windows(2)
+                .all(|pair| pair[0].completed <= pair[1].completed)
+        );
+    }
+    updates.lock().unwrap().clear();
+    let output = tempfile::tempdir().unwrap();
+    let keys: Vec<_> = session.assets().iter().map(|asset| asset.key).collect();
+    let report = session
+        .export_with_progress(
+            &keys,
+            output.path(),
+            &ExportOptions::default(),
+            &Default::default(),
+            Some(&observer),
+        )
+        .unwrap();
+    assert!(report.failed.is_empty());
+    assert_eq!(report.written.len(), 2);
+    assert_eq!(fs::read(&report.written[0]).unwrap(), b"alpha");
+    assert_eq!(fs::read(&report.written[1]).unwrap(), b"beta");
+    assert_eq!(updates.lock().unwrap().last().unwrap().completed, 2);
+    assert_eq!(updates.lock().unwrap().last().unwrap().total, Some(2));
+
+    // A failed second input must not report a completed file-reading phase.
+    fs::write(source.path().join("b.assets"), b"UnityFS\0").unwrap();
+    updates.lock().unwrap().clear();
+    assert!(
+        Session::open_with_progress(source.path(), &LoadOptions::default(), Some(observer))
+            .is_err()
+    );
+    let updates = updates.lock().unwrap();
+    let last = updates
+        .iter()
+        .rev()
+        .find(|update| update.stage == "Reading files")
+        .unwrap();
+    assert!(last.completed < last.total.unwrap());
+}
+
+#[test]
 fn continued_multi_input_load_and_extraction_cannot_swallow_shared_game_limits() {
     let root = tempfile::tempdir().unwrap();
     let valid = root.path().join("valid.assets");

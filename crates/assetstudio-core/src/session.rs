@@ -45,14 +45,24 @@ impl Session {
     /// Companion resources and split segments use the backend's file discovery;
     /// unrelated assets beside a selected file are never loaded implicitly.
     pub fn open_paths(inputs: &[PathBuf], options: &LoadOptions) -> Result<Self> {
+        Self::open_paths_with_progress(inputs, options, None)
+    }
+
+    pub fn open_paths_with_progress(
+        inputs: &[PathBuf],
+        options: &LoadOptions,
+        progress: Option<crate::ProgressObserver>,
+    ) -> Result<Self> {
         if inputs.is_empty() {
             bail!("no input paths were selected");
         }
         if inputs.len() == 1 {
-            return Self::open(&inputs[0], options);
+            return Self::open_with_progress(&inputs[0], options, progress);
         }
         options.validate()?;
-        let load = backend_options(options)?;
+        let mut load = backend_options(options)?;
+        load.progress = progress.clone();
+        report_progress(progress.as_ref(), "Preparing inputs", 0, None);
         if inputs.len() > load.limits.maximum_input_files {
             bail!("input file count exceeds the loader limit");
         }
@@ -169,8 +179,12 @@ impl Session {
             }
         }
         let mut collection = AssetCollection::from_parts(parts);
-        collection.resolve_object_metadata(load.limits)?;
-        let mut session = Self::from_studio(Studio::from_collection(collection), options)?;
+        collection.resolve_object_metadata_with_progress(load.limits, progress.as_ref())?;
+        let mut session = Self::from_studio(
+            Studio::from_collection(collection),
+            options,
+            progress.as_ref(),
+        )?;
         for path in &canonical_inputs {
             session.protected_sources.include_input(path)?;
         }
@@ -182,8 +196,18 @@ impl Session {
     }
 
     pub fn open(input: &Path, options: &LoadOptions) -> Result<Self> {
+        Self::open_with_progress(input, options, None)
+    }
+
+    pub fn open_with_progress(
+        input: &Path,
+        options: &LoadOptions,
+        progress: Option<crate::ProgressObserver>,
+    ) -> Result<Self> {
         crate::games::validate_profile(&options.game)?;
-        let load = backend_options(options)?;
+        let mut load = backend_options(options)?;
+        load.progress = progress.clone();
+        report_progress(progress.as_ref(), "Preparing inputs", 0, None);
         let (prepared, preprocess_diagnostics) = crate::games::prepare_regions_with_policy(
             input,
             &options.game,
@@ -195,7 +219,7 @@ impl Session {
             None => Studio::open_with_options(input, load),
         }
         .with_context(|| format!("open Unity input {input:?}"))?;
-        let mut session = Self::from_studio(studio, options)?;
+        let mut session = Self::from_studio(studio, options, progress.as_ref())?;
         session.protected_sources.include_input(input)?;
         session.input_paths = vec![std::fs::canonicalize(input)?];
         session.diagnostics.extend(preprocess_diagnostics);
@@ -220,10 +244,15 @@ impl Session {
         Self::from_studio(
             Studio::open_regions_with_options(inputs, backend_options(options)?)?,
             options,
+            None,
         )
     }
 
-    fn from_studio(studio: Studio, options: &LoadOptions) -> Result<Self> {
+    fn from_studio(
+        studio: Studio,
+        options: &LoadOptions,
+        progress: Option<&crate::ProgressObserver>,
+    ) -> Result<Self> {
         if studio.object_count() == 0 {
             bail!("input contains no readable Unity serialized objects");
         }
@@ -239,7 +268,12 @@ impl Session {
         let mut by_key = HashMap::new();
         by_key.try_reserve(studio.object_count())?;
         let mut text_bytes = 0usize;
-        for object in studio.objects() {
+        let object_count = studio.object_count();
+        report_progress(progress, "Building catalog", 0, Some(object_count));
+        for (index, object) in studio.objects().enumerate() {
+            if index % 4096 == 0 {
+                report_progress(progress, "Building catalog", index, Some(object_count));
+            }
             let key = AssetKey {
                 file_index: object.file_index(),
                 path_id: object.path_id(),
@@ -271,6 +305,13 @@ impl Session {
             }
             assets.push(record);
         }
+        report_progress(
+            progress,
+            "Building catalog",
+            object_count,
+            Some(object_count),
+        );
+        report_progress(progress, "Checking source files", 0, None);
         let diagnostics: Vec<String> = studio
             .load_diagnostics()
             .iter()
@@ -960,6 +1001,21 @@ fn preview_texture_limits() -> TextureReadLimits {
 
 fn catalog_text_budget(maximum_assets: usize) -> usize {
     maximum_assets.saturating_mul(256).max(256 * 1024 * 1024)
+}
+
+pub(crate) fn report_progress(
+    progress: Option<&crate::ProgressObserver>,
+    stage: &'static str,
+    completed: usize,
+    total: Option<usize>,
+) {
+    if let Some(progress) = progress {
+        progress(crate::ProgressUpdate {
+            stage,
+            completed,
+            total,
+        });
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,17 @@ entry point `Build/AssetStudio.GUI.exe` runs the same native binary, so the exis
 is the native CLI; `Build/AssetStudio.CLI.exe` is its compatibility entry point.
 Previous launcher executables are retained as `.pre-rust.bak` files.
 
+The desktop uses a `#090909` background with white controls. After loading, select
+**Mesh**, **Texture2D**, **AudioClip**, or another entry under **Types** in the left
+sidebar. **All types** clears that filter; the search box further narrows the list.
+Use **GameObject** or **Animator** for complete models rather than individual meshes.
+Additional formats and grouping controls are under **Export options**.
+
+The bottom progress bar stays visible during background operations. Opening assets
+reports file, asset-name, catalog and browser preparation counts; asset exports
+report processed items. Percentages apply to the current named stage. Stages with
+no known total show an animated bar and elapsed time.
+
 Open the complete `A:\Blender\Rust_Assets` folder to resolve models' external
 texture CABs. Opening only `content.bundle_unpacked` provides geometry but leaves
 the external texture bundles unavailable. The desktop's catalog capacity defaults

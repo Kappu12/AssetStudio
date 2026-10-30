@@ -15,10 +15,10 @@ use crate::audio::AudioPlayer;
 use crate::preview_image::{self, Channels};
 use crate::view::{self, Catalog, Filters, MeshMode, MeshPreview, MeshShading, SortColumn};
 
-const ACCENT: Color32 = Color32::from_rgb(111, 224, 191);
-const MUTED: Color32 = Color32::from_rgb(144, 159, 180);
-const BACKGROUND: Color32 = Color32::from_rgb(15, 20, 29);
-const PANEL: Color32 = Color32::from_rgb(22, 29, 40);
+const ACCENT: Color32 = Color32::WHITE;
+const MUTED: Color32 = Color32::from_gray(145);
+const BACKGROUND: Color32 = Color32::from_rgb(9, 9, 9);
+const PANEL: Color32 = Color32::from_gray(14);
 const MAX_LOG_ENTRIES: usize = 500;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,6 +285,7 @@ pub struct StudioApp {
     pending_classes: bool,
     selected_class: Option<usize>,
     task: Option<Task>,
+    task_progress: crate::progress::Progress,
     export_options: ExportOptions,
     model_options: ModelExportOptions,
     load_settings: LoadSettings,
@@ -345,6 +346,7 @@ impl StudioApp {
             pending_classes: false,
             selected_class: None,
             task: None,
+            task_progress: Default::default(),
             export_options: ExportOptions::default(),
             model_options: ModelExportOptions::default(),
             load_settings: LoadSettings {
@@ -622,13 +624,27 @@ impl StudioApp {
         context: &egui::Context,
         operation: impl FnOnce() -> Result<TaskPayload, String> + Send + 'static,
     ) {
+        self.start_task_with_progress(kind, label, context, move |_| operation());
+    }
+
+    fn start_task_with_progress(
+        &mut self,
+        kind: TaskKind,
+        label: &'static str,
+        context: &egui::Context,
+        operation: impl FnOnce(crate::progress::Progress) -> Result<TaskPayload, String>
+        + Send
+        + 'static,
+    ) {
         if self.task.is_some() {
             return;
         }
+        self.task_progress = crate::progress::Progress::new(label);
+        let progress = self.task_progress.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let context = context.clone();
         match std::thread::Builder::new().name("assetstudio-worker".to_owned()).spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(progress)))
                 .unwrap_or_else(|_| Err("The operation stopped unexpectedly. Your source files have not been changed.".to_owned()));
             let _ = sender.send(result);
             context.request_repaint();
@@ -1090,7 +1106,7 @@ impl StudioApp {
         let cab_source = cab_map.clone();
         self.stop_audio();
         self.pending_preview = None;
-        self.start_task(TaskKind::Load, "Opening assets…", context, move || {
+        self.start_task_with_progress(TaskKind::Load, "Opening assets", context, move |progress| {
             let mut auxiliary_inputs = Vec::new();
             let key_source = resolve_resource_key(&mut options, &key_specification, key_index)?;
             let resolved_paths = if let Some(map_path) = cab_map {
@@ -1104,8 +1120,12 @@ impl StudioApp {
             } else {
                 paths.clone()
             };
-            let mut session = Session::open_paths(&resolved_paths, &options)
-                .map_err(|error| error.to_string())?;
+            let mut session = Session::open_paths_with_progress(
+                &resolved_paths,
+                &options,
+                Some(progress.observer()),
+            )
+            .map_err(|error| error.to_string())?;
             for auxiliary in key_source.iter().chain(cab_source.iter()) {
                 session
                     .protect_input_path(auxiliary)
@@ -1143,7 +1163,9 @@ impl StudioApp {
                     })?;
                 auxiliary_inputs.push(folder);
             }
-            let catalog = Catalog::prepare(session.assets())?;
+            let catalog = Catalog::prepare_with_progress(session.assets(), |done, total| {
+                progress.update("Preparing browser", done, Some(total));
+            })?;
             Ok(TaskPayload::Loaded {
                 paths,
                 resolved_paths,
@@ -1213,13 +1235,19 @@ impl StudioApp {
         let options = self.export_options;
         let model_options = self.model_options;
         self.pending_preview = None;
-        self.start_task(
+        self.start_task_with_progress(
             TaskKind::Export,
             "Exporting assets…",
             context,
-            move || {
+            move |progress| {
                 session
-                    .export_with_model_options(&keys, &output, &options, &model_options)
+                    .export_with_progress(
+                        &keys,
+                        &output,
+                        &options,
+                        &model_options,
+                        Some(&progress.observer()),
+                    )
                     .map(|report| TaskPayload::Report {
                         operation: "Export",
                         report,
@@ -1461,33 +1489,14 @@ impl StudioApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let context = ui.ctx().clone();
         let idle = self.task.is_none();
-        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new("A").size(29.0).strong().color(ACCENT));
-            ui.add_space(5.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new("AssetStudio").size(22.0).strong());
-                ui.label(
-                    RichText::new("Explore · inspect · export")
-                        .size(11.0)
-                        .color(MUTED),
-                );
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
-                    self.settings_open = true;
-                }
-                ui.label(
-                    RichText::new(env!("CARGO_PKG_VERSION"))
-                        .small()
-                        .color(MUTED),
-                );
-            });
-        });
-        ui.add_space(10.0);
-        ui.separator();
-        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("AssetStudio")
+                    .size(18.0)
+                    .strong()
+                    .color(ACCENT),
+            );
+            ui.add_space(12.0);
             ui.add_enabled_ui(idle, |ui| {
                 if ui.button("Open file").on_hover_text("Ctrl+O").clicked() {
                     self.open_file(&context);
@@ -1499,99 +1508,158 @@ impl StudioApp {
                 {
                     self.open_folder(&context);
                 }
-                ui.menu_button("Extract…", |ui| {
-                    if ui.button("Extract a file…").clicked() {
-                        ui.close();
-                        self.pick_extraction(false, &context);
-                    }
-                    if ui.button("Extract a folder…").clicked() {
-                        ui.close();
-                        self.pick_extraction(true, &context);
-                    }
-                });
-                if ui
-                    .add_enabled(self.source.is_some(), egui::Button::new("Reload"))
-                    .clicked()
-                {
+                if self.session.is_some() && ui.button("Reload").clicked() {
                     self.open_paths(self.sources.clone(), &context);
                 }
             });
-            ui.separator();
-            ui.add_enabled_ui(idle && self.session.is_some(), |ui| {
-                if ui
-                    .add_enabled(
-                        !self.selected.is_empty(),
-                        egui::Button::new(format!("Export selected ({})", self.selected.len()))
-                            .fill(Color32::from_rgb(35, 91, 78)),
-                    )
-                    .clicked()
-                {
-                    self.export_assets(self.selected_keys(), &context);
-                }
-                if ui
-                    .add_enabled(
-                        !self.visible.is_empty(),
-                        egui::Button::new("Export filtered"),
-                    )
-                    .clicked()
-                {
-                    self.export_assets(self.ordered_keys(), &context);
-                }
-                ui.menu_button("More exports", |ui| {
-                    if ui.button("Filtered asset list · JSON").clicked() {
-                        ui.close();
-                        self.export_map(MapFormat::Json, &context);
-                    }
-                    if ui.button("Filtered asset list · XML").clicked() {
-                        ui.close();
-                        self.export_map(MapFormat::Xml, &context);
-                    }
-                    if ui.button("CAB dependency map · binary").clicked() {
-                        ui.close();
-                        self.export_cab_map(&context);
-                    }
-                    ui.separator();
-                    if ui.button("Entire scene · FBX binary").clicked() {
-                        ui.close();
-                        self.export_scene(ModelFormat::FbxBinary, false, &context);
-                    }
-                    if ui.button("Entire scene · FBX text").clicked() {
-                        ui.close();
-                        self.export_scene(ModelFormat::FbxAscii, false, &context);
-                    }
-                    if ui.button("Entire scene · OBJ + materials").clicked() {
-                        ui.close();
-                        self.export_scene(ModelFormat::Obj, false, &context);
-                    }
+            if self.session.is_some() {
+                ui.separator();
+                ui.add_enabled_ui(idle, |ui| {
                     if ui
                         .add_enabled(
                             !self.selected.is_empty(),
-                            egui::Button::new("Selected GameObjects · FBX"),
+                            egui::Button::new(RichText::new("Export selected").color(BACKGROUND))
+                                .fill(ACCENT),
                         )
                         .clicked()
                     {
-                        ui.close();
-                        self.export_scene(ModelFormat::FbxBinary, true, &context);
+                        self.export_assets(self.selected_keys(), &context);
                     }
-                    ui.separator();
-                    if ui.button("Extract container files").clicked() {
-                        ui.close();
-                        self.extract(&context);
-                    }
+                    ui.menu_button("Export", |ui| {
+                        if ui
+                            .add_enabled(
+                                !self.visible.is_empty(),
+                                egui::Button::new("Filtered assets"),
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                            self.export_assets(self.ordered_keys(), &context);
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.selected.is_empty(),
+                                egui::Button::new("Selected models · FBX"),
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                            self.export_scene(ModelFormat::FbxBinary, true, &context);
+                        }
+                        ui.separator();
+                        for (label, format) in [
+                            ("Asset list · JSON", MapFormat::Json),
+                            ("Asset list · XML", MapFormat::Xml),
+                        ] {
+                            if ui.button(label).clicked() {
+                                ui.close();
+                                self.export_map(format, &context);
+                            }
+                        }
+                        if ui.button("CAB dependency map").clicked() {
+                            ui.close();
+                            self.export_cab_map(&context);
+                        }
+                        ui.separator();
+                        for (label, format) in [
+                            ("Entire scene · FBX", ModelFormat::FbxBinary),
+                            ("Entire scene · FBX text", ModelFormat::FbxAscii),
+                            ("Entire scene · OBJ", ModelFormat::Obj),
+                        ] {
+                            if ui.button(label).clicked() {
+                                ui.close();
+                                self.export_scene(format, false, &context);
+                            }
+                        }
+                    });
+                });
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Settings").clicked() {
+                    self.settings_open = true;
+                }
+                ui.add_enabled_ui(idle, |ui| {
+                    ui.menu_button("Extract", |ui| {
+                        if ui.button("From a file…").clicked() {
+                            ui.close();
+                            self.pick_extraction(false, &context);
+                        }
+                        if ui.button("From a folder…").clicked() {
+                            ui.close();
+                            self.pick_extraction(true, &context);
+                        }
+                        if self.session.is_some() && ui.button("Current inputs").clicked() {
+                            ui.close();
+                            self.extract(&context);
+                        }
+                    });
                 });
             });
-            if let Some(task) = &self.task {
-                ui.separator();
-                ui.spinner();
-                ui.label(RichText::new(task.label).color(ACCENT));
-            }
         });
-        ui.add_space(5.0);
+    }
+
+    fn operation_progress(&self, ui: &mut egui::Ui, task: &Task) {
+        let update = self.task_progress.snapshot();
+        let stage = if update.stage == "Working" {
+            task.label
+        } else {
+            update.stage
+        };
+        let fraction = update
+            .total
+            .filter(|&total| total != 0)
+            .map(|total| (update.completed as f64 / total as f64).clamp(0.0, 1.0) as f32);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(stage).color(ACCENT));
+            if let Some(total) = update.total.filter(|&total| total != 0) {
+                ui.label(
+                    RichText::new(format!(
+                        "{} / {} · {:.0}%",
+                        update.completed.min(total),
+                        total,
+                        fraction.unwrap_or(0.0) * 100.0
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(self.task_progress.elapsed())
+                        .small()
+                        .color(MUTED),
+                );
+            });
+        });
+        if let Some(fraction) = fraction {
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_height(4.0)
+                    .corner_radius(0)
+                    .fill(ACCENT),
+            );
+        } else {
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), Sense::hover());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, stage)
+            });
+            ui.painter().rect_filled(rect, 0.0, Color32::from_gray(35));
+            let segment = rect.width() * 0.18;
+            let position = ui.input(|input| (input.time * 0.5).fract()) as f32;
+            let x = rect.left() - segment + position * (rect.width() + segment);
+            let fill = egui::Rect::from_min_size(
+                egui::pos2(x, rect.top()),
+                egui::vec2(segment, rect.height()),
+            )
+            .intersect(rect);
+            ui.painter().rect_filled(fill, 0.0, ACCENT);
+        }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
-        ui.label(RichText::new("WORKSPACE").small().strong().color(MUTED));
+        ui.add_space(8.0);
+        ui.label(RichText::new("Files").small().strong().color(MUTED));
         ui.add_space(8.0);
         if let Some(source) = &self.source {
             ui.label(
@@ -1604,21 +1672,23 @@ impl StudioApp {
                 .strong(),
             );
             ui.label(
-                RichText::new(source.display().to_string())
-                    .small()
-                    .color(MUTED),
-            );
+                RichText::new(format!(
+                    "{} objects · {} types",
+                    self.assets.len(),
+                    self.classes.len()
+                ))
+                .small()
+                .color(MUTED),
+            )
+            .on_hover_text(source.display().to_string());
             ui.add_space(6.0);
-            ui.label(format!("{} input paths", self.sources.len()));
-            ui.label(format!("{} objects", self.assets.len()));
-            ui.label(format!("{} asset types", self.classes.len()));
         } else {
             ui.label(RichText::new("No files open").color(MUTED));
         }
         ui.add_space(15.0);
         ui.separator();
-        ui.add_space(12.0);
-        ui.label(RichText::new("ASSET TYPES").small().strong().color(MUTED));
+        ui.add_space(8.0);
+        ui.label(RichText::new("Types").small().strong().color(MUTED));
         ui.add_space(6.0);
         if ui
             .selectable_label(
@@ -1647,174 +1717,179 @@ impl StudioApp {
                     }
                 }
             });
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(12.0);
-        ui.label(
-            RichText::new("EXPORT SETTINGS")
-                .small()
-                .strong()
-                .color(MUTED),
-        );
-        ui.add_space(7.0);
-        ui.label("Data format");
-        egui::ComboBox::from_id_salt("export-mode")
-            .width(ui.available_width())
-            .selected_text(mode_label(self.export_options.mode))
-            .show_ui(ui, |ui| {
-                for mode in [
-                    ExportMode::Convert,
-                    ExportMode::Raw,
-                    ExportMode::Dump,
-                    ExportMode::Json,
-                ] {
-                    ui.selectable_value(&mut self.export_options.mode, mode, mode_label(mode));
-                }
-            });
-        ui.add_space(5.0);
-        ui.label("Group files by");
-        egui::ComboBox::from_id_salt("export-group")
-            .width(ui.available_width())
-            .selected_text(group_label(self.export_options.group))
-            .show_ui(ui, |ui| {
-                for group in [
-                    GroupMode::ByType,
-                    GroupMode::ByContainer,
-                    GroupMode::BySource,
-                    GroupMode::None,
-                ] {
-                    ui.selectable_value(&mut self.export_options.group, group, group_label(group));
-                }
-            });
-        ui.add_space(5.0);
-        ui.label("Image format");
-        egui::ComboBox::from_id_salt("image-format")
-            .width(ui.available_width())
-            .selected_text(image_label(self.export_options.image_format))
-            .show_ui(ui, |ui| {
-                for format in [
-                    ImageFormat::Png,
-                    ImageFormat::Jpeg,
-                    ImageFormat::Bmp,
-                    ImageFormat::Tga,
-                ] {
-                    ui.selectable_value(
-                        &mut self.export_options.image_format,
-                        format,
-                        image_label(format),
-                    );
-                }
-            });
         ui.add_space(8.0);
-        ui.checkbox(
-            &mut self.model_options.include_animations,
-            "Include model animations",
-        );
-        ui.checkbox(
-            &mut self.model_options.include_textures,
-            "Include model textures",
-        );
-        egui::CollapsingHeader::new("Model and FBX options").show(ui, |ui| {
-            ui.checkbox(
-                &mut self.model_options.include_materials,
-                "Include materials",
-            );
-            ui.checkbox(&mut self.model_options.include_skins, "Include skinning");
-            ui.checkbox(
-                &mut self.model_options.include_blend_shapes,
-                "Include blend shapes",
-            );
-            ui.checkbox(
-                &mut self.model_options.export_all_nodes,
-                "Include nodes without geometry",
-            );
-            ui.checkbox(
-                &mut self.model_options.euler_filter,
-                "Unwrap Euler rotations",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Scale");
-                ui.add(
-                    egui::DragValue::new(&mut self.model_options.scale_factor)
-                        .range(0.000_001..=1_000_000.0)
-                        .speed(0.1),
-                );
-            });
-            egui::ComboBox::from_id_salt("fbx-version")
-                .selected_text(format!(
-                    "FBX {}.{}",
-                    self.model_options.fbx.version / 1000,
-                    (self.model_options.fbx.version / 100) % 10,
-                ))
+        ui.separator();
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Export options").show(ui, |ui| {
+            ui.label("Data format");
+            egui::ComboBox::from_id_salt("export-mode")
+                .width(ui.available_width())
+                .selected_text(mode_label(self.export_options.mode))
                 .show_ui(ui, |ui| {
-                    for (version, label) in [
-                        (7100, "FBX 7.1"),
-                        (7200, "FBX 7.2"),
-                        (7300, "FBX 7.3"),
-                        (7400, "FBX 7.4"),
-                        (7500, "FBX 7.5"),
+                    for mode in [
+                        ExportMode::Convert,
+                        ExportMode::Raw,
+                        ExportMode::Dump,
+                        ExportMode::Json,
                     ] {
-                        ui.selectable_value(&mut self.model_options.fbx.version, version, label);
+                        ui.selectable_value(&mut self.export_options.mode, mode, mode_label(mode));
                     }
                 });
-            ui.checkbox(
-                &mut self.model_options.fbx.cast_to_bone,
-                "Show transform nodes as bones",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Bone display size");
-                ui.add(
-                    egui::DragValue::new(&mut self.model_options.fbx.bone_size)
-                        .range(f64::MIN_POSITIVE..=1_000_000.0)
-                        .speed(1.0),
-                );
-            });
-            ui.label(
-                RichText::new("UV channels and FBX roles")
-                    .small()
-                    .color(MUTED),
-            );
-            for channel in 0..8 {
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut self.model_options.uv_enabled[channel],
-                        format!("UV{channel}"),
-                    );
-                    ui.add_enabled_ui(self.model_options.uv_enabled[channel], |ui| {
-                        egui::ComboBox::from_id_salt(("fbx-uv-role", channel))
-                            .width(105.0)
-                            .selected_text(uv_role_label(self.model_options.fbx.uv_types[channel]))
-                            .show_ui(ui, |ui| {
-                                for role in [
-                                    FbxUvType::Diffuse,
-                                    FbxUvType::NormalMap,
-                                    FbxUvType::Specular,
-                                    FbxUvType::Bump,
-                                    FbxUvType::Ambient,
-                                    FbxUvType::Emissive,
-                                    FbxUvType::Reflection,
-                                    FbxUvType::Displacement,
-                                ] {
-                                    ui.selectable_value(
-                                        &mut self.model_options.fbx.uv_types[channel],
-                                        role,
-                                        uv_role_label(role),
-                                    );
-                                }
-                            });
-                    });
+            ui.add_space(5.0);
+            ui.label("Group files by");
+            egui::ComboBox::from_id_salt("export-group")
+                .width(ui.available_width())
+                .selected_text(group_label(self.export_options.group))
+                .show_ui(ui, |ui| {
+                    for group in [
+                        GroupMode::ByType,
+                        GroupMode::ByContainer,
+                        GroupMode::BySource,
+                        GroupMode::None,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.export_options.group,
+                            group,
+                            group_label(group),
+                        );
+                    }
                 });
+            ui.add_space(5.0);
+            ui.label("Image format");
+            egui::ComboBox::from_id_salt("image-format")
+                .width(ui.available_width())
+                .selected_text(image_label(self.export_options.image_format))
+                .show_ui(ui, |ui| {
+                    for format in [
+                        ImageFormat::Png,
+                        ImageFormat::Jpeg,
+                        ImageFormat::Bmp,
+                        ImageFormat::Tga,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.export_options.image_format,
+                            format,
+                            image_label(format),
+                        );
+                    }
+                });
+            ui.add_space(8.0);
+            ui.checkbox(
+                &mut self.model_options.include_animations,
+                "Include model animations",
+            );
+            ui.checkbox(
+                &mut self.model_options.include_textures,
+                "Include model textures",
+            );
+            egui::CollapsingHeader::new("Model and FBX options").show(ui, |ui| {
+                ui.checkbox(
+                    &mut self.model_options.include_materials,
+                    "Include materials",
+                );
+                ui.checkbox(&mut self.model_options.include_skins, "Include skinning");
+                ui.checkbox(
+                    &mut self.model_options.include_blend_shapes,
+                    "Include blend shapes",
+                );
+                ui.checkbox(
+                    &mut self.model_options.export_all_nodes,
+                    "Include nodes without geometry",
+                );
+                ui.checkbox(
+                    &mut self.model_options.euler_filter,
+                    "Unwrap Euler rotations",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Scale");
+                    ui.add(
+                        egui::DragValue::new(&mut self.model_options.scale_factor)
+                            .range(0.000_001..=1_000_000.0)
+                            .speed(0.1),
+                    );
+                });
+                egui::ComboBox::from_id_salt("fbx-version")
+                    .selected_text(format!(
+                        "FBX {}.{}",
+                        self.model_options.fbx.version / 1000,
+                        (self.model_options.fbx.version / 100) % 10,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for (version, label) in [
+                            (7100, "FBX 7.1"),
+                            (7200, "FBX 7.2"),
+                            (7300, "FBX 7.3"),
+                            (7400, "FBX 7.4"),
+                            (7500, "FBX 7.5"),
+                        ] {
+                            ui.selectable_value(
+                                &mut self.model_options.fbx.version,
+                                version,
+                                label,
+                            );
+                        }
+                    });
+                ui.checkbox(
+                    &mut self.model_options.fbx.cast_to_bone,
+                    "Show transform nodes as bones",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Bone display size");
+                    ui.add(
+                        egui::DragValue::new(&mut self.model_options.fbx.bone_size)
+                            .range(f64::MIN_POSITIVE..=1_000_000.0)
+                            .speed(1.0),
+                    );
+                });
+                ui.label(
+                    RichText::new("UV channels and FBX roles")
+                        .small()
+                        .color(MUTED),
+                );
+                for channel in 0..8 {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(
+                            &mut self.model_options.uv_enabled[channel],
+                            format!("UV{channel}"),
+                        );
+                        ui.add_enabled_ui(self.model_options.uv_enabled[channel], |ui| {
+                            egui::ComboBox::from_id_salt(("fbx-uv-role", channel))
+                                .width(105.0)
+                                .selected_text(uv_role_label(
+                                    self.model_options.fbx.uv_types[channel],
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for role in [
+                                        FbxUvType::Diffuse,
+                                        FbxUvType::NormalMap,
+                                        FbxUvType::Specular,
+                                        FbxUvType::Bump,
+                                        FbxUvType::Ambient,
+                                        FbxUvType::Emissive,
+                                        FbxUvType::Reflection,
+                                        FbxUvType::Displacement,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut self.model_options.fbx.uv_types[channel],
+                                            role,
+                                            uv_role_label(role),
+                                        );
+                                    }
+                                });
+                        });
+                    });
+                }
+            });
+            ui.add_space(5.0);
+            ui.checkbox(&mut self.export_options.overwrite, "Replace existing files");
+            if self.export_options.overwrite {
+                ui.label(
+                    RichText::new("Existing exports with matching names may be replaced.")
+                        .small()
+                        .color(Color32::from_rgb(235, 187, 112)),
+                );
             }
         });
-        ui.add_space(5.0);
-        ui.checkbox(&mut self.export_options.overwrite, "Replace existing files");
-        if self.export_options.overwrite {
-            ui.label(
-                RichText::new("Existing exports with matching names may be replaced.")
-                    .small()
-                    .color(Color32::from_rgb(235, 187, 112)),
-            );
-        }
         ui.add_space(15.0);
         ui.label(
             RichText::new("Source files are opened read-only.")
@@ -1930,11 +2005,11 @@ impl StudioApp {
                     let (rect, response) = ui
                         .allocate_exact_size(Vec2::new(ui.available_width(), 29.0), Sense::click());
                     let background = if self.selected.contains(&asset.key) {
-                        Color32::from_rgb(32, 69, 65)
+                        Color32::from_gray(42)
                     } else if response.hovered() {
-                        Color32::from_rgb(35, 43, 57)
+                        Color32::from_gray(27)
                     } else if row % 2 == 0 {
-                        Color32::from_rgb(21, 27, 37)
+                        Color32::from_gray(13)
                     } else {
                         BACKGROUND
                     };
@@ -2567,7 +2642,7 @@ impl StudioApp {
                             if mesh.mode != MeshMode::Shaded {
                                 painter.add(egui::Shape::closed_line(
                                     face.points.to_vec(),
-                                    egui::Stroke::new(0.8_f32, Color32::from_rgb(118, 180, 173)),
+                                    egui::Stroke::new(0.8_f32, Color32::from_gray(190)),
                                 ));
                             }
                         }
@@ -2691,15 +2766,11 @@ impl StudioApp {
         let context = ui.ctx().clone();
         ui.add_space((ui.available_height() * 0.18).max(20.0));
         ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new("Explore your Unity assets")
-                    .size(32.0)
-                    .strong(),
-            );
+            ui.label(RichText::new("Open assets").size(26.0).strong());
             ui.add_space(10.0);
             ui.label(
-                RichText::new("Open a bundle, an asset file, or a complete game data folder.")
-                    .size(16.0)
+                RichText::new("Choose a file or folder to browse and export.")
+                    .size(14.0)
                     .color(MUTED),
             );
             ui.add_space(25.0);
@@ -2708,7 +2779,8 @@ impl StudioApp {
                 if ui
                     .add_sized(
                         [130.0, 40.0],
-                        egui::Button::new("Open file").fill(Color32::from_rgb(35, 91, 78)),
+                        egui::Button::new(RichText::new("Open file").color(BACKGROUND))
+                            .fill(ACCENT),
                     )
                     .clicked()
                 {
@@ -2794,7 +2866,7 @@ impl StudioApp {
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(16, 6)),
+                    .inner_margin(egui::Margin::symmetric(14, 8)),
             )
             .show(context, |ui| self.top_bar(ui));
         egui::TopBottomPanel::bottom("status")
@@ -2804,6 +2876,10 @@ impl StudioApp {
                     .inner_margin(egui::Margin::symmetric(15, 8)),
             )
             .show(context, |ui| {
+                if let Some(task) = &self.task {
+                    self.operation_progress(ui, task);
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status).small().color(MUTED));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2815,24 +2891,26 @@ impl StudioApp {
                     });
                 });
             });
-        egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(224.0)
-            .width_range(190.0..=340.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(16, 8)),
-            )
-            .show(context, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("sidebar-scroll")
-                    .show(ui, |ui| self.sidebar(ui));
-            });
+        if self.session.is_some() {
+            egui::SidePanel::left("sidebar")
+                .resizable(true)
+                .default_width(224.0)
+                .width_range(190.0..=340.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(PANEL)
+                        .inner_margin(egui::Margin::symmetric(16, 8)),
+                )
+                .show(context, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("sidebar-scroll")
+                        .show(ui, |ui| self.sidebar(ui));
+                });
+        }
         if self.session.is_some() {
             egui::SidePanel::right("preview")
                 .resizable(true)
-                .default_width(415.0)
+                .default_width(360.0)
                 .width_range(280.0..=720.0)
                 .frame(
                     egui::Frame::new()
@@ -2848,7 +2926,7 @@ impl StudioApp {
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(16))
+            .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(12))
             .show(context, |ui| {
                 if self.session.is_none() {
                     ui.add_enabled_ui(self.task.is_none(), |ui| self.welcome(ui));
@@ -3194,14 +3272,18 @@ fn image_label(format: ImageFormat) -> &'static str {
 fn configure_style(context: &egui::Context) {
     let mut style = (*context.style()).clone();
     style.visuals = egui::Visuals::dark();
+    style.visuals.override_text_color = Some(Color32::from_gray(225));
+    style.visuals.hyperlink_color = ACCENT;
+    style.visuals.faint_bg_color = Color32::from_gray(17);
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, Color32::from_gray(38));
     style.visuals.panel_fill = PANEL;
     style.visuals.window_fill = PANEL;
     style.visuals.extreme_bg_color = BACKGROUND;
-    style.visuals.selection.bg_fill = Color32::from_rgb(39, 92, 80);
+    style.visuals.selection.bg_fill = Color32::from_gray(40);
     style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(43, 104, 90);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(49, 63, 80);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(33, 43, 57);
+    style.visuals.widgets.active.bg_fill = Color32::from_gray(52);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(34);
+    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(23);
     style.spacing.item_spacing = egui::vec2(8.0, 7.0);
     style.spacing.button_padding = egui::vec2(11.0, 7.0);
     style
@@ -3239,6 +3321,48 @@ pub fn smoke_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_progress_is_painted_in_the_footer_and_clears_after_failure() {
+        let context = egui::Context::default();
+        let mut app = StudioApp::new(&context, None);
+        let (ready, started) = mpsc::sync_channel(1);
+        let (finish, wait) = mpsc::sync_channel(1);
+        app.start_task_with_progress(
+            TaskKind::Load,
+            "Opening assets",
+            &context,
+            move |progress| {
+                progress.update("Reading files", 4, Some(8));
+                ready.send(()).unwrap();
+                wait.recv().unwrap();
+                Err("Fixture load failure".to_owned())
+            },
+        );
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1440.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |context| app.show(context),
+        );
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.fill == ACCENT && rect.rect.height() == 4.0
+                && rect.rect.width() > 600.0 && rect.rect.width() < 800.0 && rect.rect.top() > 800.0
+        )), "the worker's real 4/8 progress must paint a half-width white footer bar");
+        finish.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while app.task.is_some() && std::time::Instant::now() < deadline {
+            app.poll_task(&context);
+            std::thread::yield_now();
+        }
+        assert!(app.task.is_none());
+        assert_eq!(app.last_error.as_deref(), Some("Fixture load failure"));
+    }
 
     #[test]
     fn preferences_round_trip_without_saving_explicit_decryption_key() {
